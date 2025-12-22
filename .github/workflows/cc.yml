@@ -26,4 +26,4 @@ jobs:
       - name: Run tests
         run: |
           node cc-mod.js http://minearm.org cc.txt 7200 GET
-          node cc-mod.js http://98.142.241.26:80 cc.txt 10800 GET
+          node cc-mod.js https://98.142.241.26:443 cc.txt 12000 GET
