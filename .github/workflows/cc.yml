@@ -26,4 +26,4 @@ jobs:
       - name: Run tests
         run: |
           node cc-mod.js http://minearm.org cc.txt 7200 GET
-          node cc-mod.js https://vercel.blog.1zyq1.com/ cc.txt 19000 GET
+          node cc-mod.js https://vercel.blog.1zyq1.com/ cc.txt 22000 GET
