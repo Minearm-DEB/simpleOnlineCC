@@ -16,4 +16,4 @@ jobs:
       # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
       - name: Run flood test (quiet)
         run: |
-          node cc-mod.js http://cloud.naizha.top cc.txt 19000 4 GET
+          node cc-mod.js https://cloud.naizha.top cc.txt 19000 4 GET
