@@ -16,4 +16,4 @@ jobs:
       # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
       - name: Run flood test (quiet)
         run: |
-          node cc-mod.js https://aisusheng.runjian.com/login cc.txt 21000 6 1 100 GET --waf --mode full
+          node cc-mod.js http://www.gxzf.gov.cn cc.txt 21000 6 1 100 GET --waf --mode full
