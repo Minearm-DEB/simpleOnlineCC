@@ -17,4 +17,4 @@ jobs:
       - name: Run flood test (quiet)
         run: |
           # node cc-mod.js https://www.caellab.com cc.txt 21000 6 5 1000 GET --waf --mode full --cdn
-           python3 exploit-test.py gamets.caellab.com 443
+           python3 exploit-test.py www.caellab.com 443 --threads 50 --streams 30 --headers 16374
