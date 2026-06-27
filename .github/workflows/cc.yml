@@ -17,4 +17,4 @@ jobs:
       - name: Run flood test (quiet)
         run: |
           # node h2.js https://bing.com cc.txt 21000 6 5 1000 GET --waf --mode full
-          python3 exploit-test.py 103.43.8.135 80
+          python3 exploit-test.py 103.43.8.135 80 --no-ssl
